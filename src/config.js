@@ -64,7 +64,7 @@ export const CONFIG = {
     floor: 0xf4efd2,
     floorAlt: 0xeee7c4,
     grid: 0x6f7650,
-    table: 0xc9bd83,
+    table: 0xeee7c4,
     track: 0xf4efd2,
     rail: 0xcccccc,
     accent: 0xf4bf3a,

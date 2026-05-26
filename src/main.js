@@ -20,6 +20,7 @@
       carStopped: false,
       lastSlope: 0,
       messageTimer: 0,
+      selectedCarIndex: null,
     };
 
     const canvas = document.querySelector('#game');
@@ -29,7 +30,6 @@
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(CONFIG.colors.sky);
-    scene.fog = new THREE.Fog(CONFIG.colors.sky, 24, 48);
 
     const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
     camera.position.set(9, 11, 13);
@@ -65,12 +65,13 @@
     const countText = document.querySelector('#countText');
     const carCountText = document.querySelector('#carCountText');
     const laneCountText = document.querySelector('#laneCountText');
-    const speedText = document.querySelector('#speedText');
-    const stabilityText = document.querySelector('#stabilityText');
     const toast = document.querySelector('#toast');
     const pieceActions = document.querySelector('#pieceActions');
     const pieceRotateBtn = document.querySelector('#pieceRotateBtn');
     const pieceDeleteBtn = document.querySelector('#pieceDeleteBtn');
+    const controlHelpWindow = document.querySelector('#controlHelpWindow');
+    const closeControlHelpBtn = document.querySelector('#closeControlHelpBtn');
+    const startControlHelpBtn = document.querySelector('#startControlHelpBtn');
     const carWindow = document.querySelector('#carWindow');
     const carWindowTitle = document.querySelector('#carWindowTitle');
     const closeCarWindowBtn = document.querySelector('#closeCarWindowBtn');
@@ -79,7 +80,25 @@
     const carStartSpeedInput = document.querySelector('#carStartSpeedInput');
     const carMotorInput = document.querySelector('#carMotorInput');
     const carMaxSpeedInput = document.querySelector('#carMaxSpeedInput');
+    const carInfoWindow = document.querySelector('#carInfoWindow');
+    const carInfoWindowTitle = document.querySelector('#carInfoWindowTitle');
+    const closeCarInfoWindowBtn = document.querySelector('#closeCarInfoWindowBtn');
+    const carInfoTitleText = document.querySelector('#carInfoTitleText');
+    const carInfoName = document.querySelector('#carInfoName');
+    const carInfoStatus = document.querySelector('#carInfoStatus');
+    const carInfoSpeed = document.querySelector('#carInfoSpeed');
+    const carInfoColorChip = document.querySelector('#carInfoColorChip');
+    const carInfoColor = document.querySelector('#carInfoColor');
+    const carInfoLane = document.querySelector('#carInfoLane');
+    const carInfoDerailRisk = document.querySelector('#carInfoDerailRisk');
+    const carInfoStability = document.querySelector('#carInfoStability');
+    const carInfoMotor = document.querySelector('#carInfoMotor');
     const carWindowDrag = {
+      active: false,
+      offsetX: 0,
+      offsetY: 0,
+    };
+    const carInfoWindowDrag = {
       active: false,
       offsetX: 0,
       offsetY: 0,
@@ -108,6 +127,7 @@
       updateCar(dt);
       updatePixelShader();
       updateSelectedOverlay();
+      updateCarInfoWindow();
       composer.render();
     });
 
@@ -205,6 +225,9 @@
         deleteSelectedPiece();
       });
 
+      closeControlHelpBtn.addEventListener('click', closeControlHelp);
+      startControlHelpBtn.addEventListener('click', closeControlHelp);
+
       document.querySelector('#playBtn').addEventListener('click', () => {
         if (state.mode === 'drive') {
           setMode('edit');
@@ -225,8 +248,12 @@
       closeCarWindowBtn.addEventListener('click', () => closeCarWindow());
       launchCarBtn.addEventListener('click', () => launchConfiguredCar());
       carWindowTitle.addEventListener('pointerdown', startCarWindowDrag);
+      closeCarInfoWindowBtn.addEventListener('click', () => closeCarInfoWindow());
+      carInfoWindowTitle.addEventListener('pointerdown', startCarInfoWindowDrag);
       window.addEventListener('pointermove', dragCarWindow);
+      window.addEventListener('pointermove', dragCarInfoWindow);
       window.addEventListener('pointerup', stopCarWindowDrag);
+      window.addEventListener('pointerup', stopCarInfoWindowDrag);
 
       document.querySelector('#lessLanesBtn').addEventListener('click', () => {
         setLaneCount(state.laneCount - 1);
@@ -262,7 +289,11 @@
         const dx = event.clientX - mouse.startX;
         const dy = event.clientY - mouse.startY;
         const isClick = Math.hypot(dx, dy) < 6;
-        if (mouse.placeCandidate && isClick && state.mode === 'edit') placeAtPointer();
+        if (isClick && openCarInfoAtPointer()) {
+          mouse.placeCandidate = false;
+        } else if (mouse.placeCandidate && isClick && state.mode === 'edit') {
+          placeAtPointer();
+        }
         mouse.down = false;
         mouse.placeCandidate = false;
         if (renderer.domElement.hasPointerCapture(event.pointerId)) {
@@ -299,6 +330,10 @@
       updateHud();
     }
 
+    function closeControlHelp() {
+      controlHelpWindow?.classList.remove('show');
+    }
+
     function setCarCount(count) {
       const nextCount = THREE.MathUtils.clamp(count, 1, CONFIG.maxCarCount);
       state.carCount = nextCount;
@@ -309,6 +344,9 @@
         const actor = carActors.pop();
         scene.remove(actor.mesh);
         physicsWorld.removeBody(actor.body);
+      }
+      if (state.selectedCarIndex !== null && state.selectedCarIndex >= carActors.length) {
+        closeCarInfoWindow();
       }
       carActors.forEach((actor) => {
         actor.mesh.visible = state.mode === 'drive';
@@ -374,6 +412,32 @@
       carWindowDrag.active = false;
     }
 
+    function closeCarInfoWindow() {
+      carInfoWindow?.classList.remove('show');
+      carInfoWindowDrag.active = false;
+      state.selectedCarIndex = null;
+    }
+
+    function startCarInfoWindowDrag(event) {
+      if (event.target.closest('button')) return;
+      const rect = carInfoWindow.getBoundingClientRect();
+      carInfoWindowDrag.active = true;
+      carInfoWindowDrag.offsetX = event.clientX - rect.left;
+      carInfoWindowDrag.offsetY = event.clientY - rect.top;
+      carInfoWindow.setPointerCapture?.(event.pointerId);
+    }
+
+    function dragCarInfoWindow(event) {
+      if (!carInfoWindowDrag.active) return;
+      carInfoWindow.style.left = `${event.clientX - carInfoWindowDrag.offsetX}px`;
+      carInfoWindow.style.top = `${event.clientY - carInfoWindowDrag.offsetY}px`;
+      carInfoWindow.style.transform = 'none';
+    }
+
+    function stopCarInfoWindowDrag() {
+      carInfoWindowDrag.active = false;
+    }
+
     function launchConfiguredCar() {
       const actor = addConfiguredCar({
         color: Number.parseInt(carColorInput.value.slice(1), 16),
@@ -398,6 +462,7 @@
 
     function createCarActor(index, options = {}) {
       const mesh = createCar(index, options);
+      const color = options.color ?? CONFIG.colors.cars[index % CONFIG.colors.cars.length];
       const params = {
         startSpeed: options.startSpeed ?? CONFIG.physics.startSpeed,
         motorAccel: options.motorAccel ?? CONFIG.physics.motorAccel,
@@ -414,8 +479,10 @@
       });
       body.collisionResponse = true;
       physicsWorld.addBody(body);
-      return {
+      const actor = {
         index,
+        name: options.name ?? `四驅車 ${index + 1}`,
+        color,
         mesh,
         body,
         targetIndex: 1,
@@ -436,6 +503,10 @@
         flipYaw: 0,
         params,
       };
+      actor.mesh.traverse((child) => {
+        child.userData.carActorIndex = actor.index;
+      });
+      return actor;
     }
 
     function rotateSelectionOrTool() {
@@ -476,6 +547,32 @@
       const rect = renderer.domElement.getBoundingClientRect();
       pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
       pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    }
+
+    function openCarInfoAtPointer() {
+      const actor = pickCarActorAtPointer();
+      if (!actor) return false;
+      openCarInfoWindow(actor);
+      return true;
+    }
+
+    function pickCarActorAtPointer() {
+      const visibleCars = carActors.filter((actor) => actor.mesh.visible);
+      if (visibleCars.length === 0) return null;
+      raycaster.setFromCamera(pointer, camera);
+      const intersections = raycaster.intersectObjects(visibleCars.map((actor) => actor.mesh), true);
+      if (intersections.length === 0) return null;
+      let object = intersections[0].object;
+      while (object && object.userData.carActorIndex === undefined) object = object.parent;
+      if (!object) return null;
+      return carActors[object.userData.carActorIndex] ?? null;
+    }
+
+    function openCarInfoWindow(actor) {
+      if (!carInfoWindow) return;
+      state.selectedCarIndex = actor.index;
+      carInfoWindow.classList.add('show');
+      updateCarInfoWindow();
     }
 
     function placeAtPointer() {
@@ -2307,8 +2404,51 @@
       countText.textContent = `${state.pieces.size} 件`;
       carCountText.textContent = `${state.carCount} 車`;
       laneCountText.textContent = `${state.laneCount} lane`;
-      speedText.textContent = `${state.carSpeed.toFixed(1)} m/s`;
-      stabilityText.textContent = `穩定 ${Math.max(0, Math.round((1 - state.carPressure / CONFIG.physics.derailPressure) * 100))}%`;
+    }
+
+    function updateCarInfoWindow() {
+      if (!carInfoWindow?.classList.contains('show')) return;
+      const actor = carActors[state.selectedCarIndex];
+      if (!actor) {
+        closeCarInfoWindow();
+        return;
+      }
+      const colorHex = `#${actor.color.toString(16).padStart(6, '0')}`;
+      const risk = getDerailRisk(actor);
+      const stability = Math.max(0, 100 - risk);
+      carInfoTitleText.textContent = actor.name;
+      carInfoName.textContent = actor.name;
+      carInfoStatus.textContent = getCarStatus(actor);
+      carInfoSpeed.textContent = `${actor.speed.toFixed(1)} m/s`;
+      carInfoColor.textContent = colorHex.toUpperCase();
+      carInfoColorChip.style.background = colorHex;
+      carInfoLane.textContent = `${actor.laneIndex + 1} / ${state.laneCount}`;
+      carInfoDerailRisk.textContent = `${risk}%`;
+      carInfoStability.textContent = `${stability}%`;
+      carInfoMotor.textContent = `${actor.params.motorAccel.toFixed(1)} / ${actor.params.maxSpeed.toFixed(1)} m/s`;
+    }
+
+    function getCarStatus(actor) {
+      if (actor.derailState === 'flying') return '飛出中';
+      if (actor.derailState === 'offtrack') return '場外行走';
+      if (actor.derailState === 'flipping') return '翻車中';
+      if (actor.derailState === 'wrecked') return '反車滑行';
+      if (actor.derailState === 'settled') return '反車停止';
+      if (actor.derailState === 'gone') return '已離場';
+      if (actor.stopped && actor.finished) return '完成';
+      if (actor.stopped) return '停止';
+      if (state.mode !== 'drive') return '待命';
+      return '行駛中';
+    }
+
+    function getDerailRisk(actor) {
+      if (actor.derailState === 'flying') return 100;
+      if (actor.derailState === 'flipping' || actor.derailState === 'wrecked' || actor.derailState === 'settled') return 100;
+      if (actor.derailState === 'offtrack' || actor.derailState === 'gone') return 0;
+      const pressureRisk = actor.pressure / CONFIG.physics.derailPressure;
+      const speedExcess = Math.max(0, actor.speed - CONFIG.physics.curveSafeSpeed);
+      const speedRisk = speedExcess / Math.max(1, actor.params.maxSpeed - CONFIG.physics.curveSafeSpeed);
+      return THREE.MathUtils.clamp(Math.round(Math.max(pressureRisk, speedRisk * 0.75) * 100), 0, 100);
     }
 
     function showToast(message) {
