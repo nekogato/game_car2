@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>四驅車賽道工房</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --gb-ink: #1f2a16;
+      --gb-deep: #3e4a2b;
+      --gb-mid: #7f8b54;
+      --gb-paper: #f4efd2;
+      --gb-warm: #d9c98d;
+      --gb-green: #6b9d6f;
+      --gb-red: #9c4b36;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      font-family: "Courier New", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background:
+        linear-gradient(0deg, rgba(31, 42, 22, 0.05) 50%, transparent 50%) 0 0 / 100% 4px,
+        #c9d7a0;
+      color: var(--gb-ink);
+      image-rendering: pixelated;
+    }
+
+    #game {
+      width: 100vw;
+      height: 100vh;
+      display: block;
+    }
+
+    .hud {
+      position: fixed;
+      inset: 14px 14px auto 14px;
+      display: grid;
+      grid-template-columns: minmax(250px, 390px) minmax(180px, 1fr) auto;
+      gap: 10px;
+      align-items: start;
+      pointer-events: none;
+      filter: drop-shadow(5px 5px 0 rgba(31, 42, 22, 0.28));
+    }
+
+    .panel {
+      pointer-events: auto;
+      position: relative;
+      background: var(--gb-paper);
+      border: 4px solid var(--gb-ink);
+      border-radius: 0;
+      box-shadow:
+        inset 0 0 0 3px var(--gb-paper),
+        inset 0 0 0 6px var(--gb-deep);
+    }
+
+    .brand {
+      padding: 14px 16px 13px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1;
+      letter-spacing: 0;
+      text-shadow: 2px 0 0 rgba(127, 139, 84, 0.28);
+    }
+
+    .status {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      color: var(--gb-ink);
+      font-size: 12px;
+      line-height: 1;
+    }
+
+    .status span {
+      padding: 4px 6px;
+      background: #e6ddb0;
+      border: 2px solid var(--gb-deep);
+    }
+
+    .toolbar {
+      padding: 9px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }
+
+    button {
+      border: 3px solid var(--gb-ink);
+      border-radius: 0;
+      background: var(--gb-paper);
+      color: var(--gb-ink);
+      min-height: 36px;
+      min-width: 36px;
+      padding: 0 10px;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 800;
+      line-height: 1;
+      cursor: pointer;
+      box-shadow: inset -3px -3px 0 var(--gb-warm);
+      transition: transform 80ms steps(1), background 80ms steps(1);
+    }
+
+    button:hover {
+      transform: translate(-1px, -1px);
+      background: #fff9d8;
+    }
+
+    button.active {
+      color: var(--gb-paper);
+      background: var(--gb-deep);
+      box-shadow: inset 3px 3px 0 var(--gb-ink);
+    }
+
+    .tool-icon {
+      font-size: 16px;
+      font-weight: 800;
+    }
+
+    .actions {
+      padding: 9px;
+      display: flex;
+      gap: 6px;
+      justify-content: flex-end;
+    }
+
+    .primary {
+      background: var(--gb-green);
+      border-color: var(--gb-ink);
+      color: var(--gb-ink);
+      min-width: 76px;
+    }
+
+    .danger {
+      color: var(--gb-paper);
+      background: var(--gb-red);
+      border-color: var(--gb-ink);
+    }
+
+    .toast {
+      position: fixed;
+      left: 50%;
+      bottom: 20px;
+      transform: translateX(-50%);
+      width: min(520px, calc(100vw - 32px));
+      padding: 12px 14px;
+      text-align: center;
+      font-size: 13px;
+      font-weight: 800;
+      color: var(--gb-ink);
+      background: var(--gb-paper);
+      border: 4px solid var(--gb-ink);
+      border-radius: 0;
+      box-shadow: inset 0 0 0 4px var(--gb-deep), 4px 4px 0 rgba(31, 42, 22, 0.28);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 120ms steps(2), transform 120ms steps(2);
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translate(-50%, -4px);
+    }
+
+    .piece-actions {
+      position: fixed;
+      display: none;
+      gap: 5px;
+      z-index: 4;
+      pointer-events: auto;
+      filter: drop-shadow(3px 3px 0 rgba(31, 42, 22, 0.28));
+    }
+
+    .piece-actions.show {
+      display: flex;
+    }
+
+    .piece-actions button {
+      min-width: 30px;
+      min-height: 30px;
+      padding: 0;
+      background: #fff9d8;
+    }
+
+    .piece-actions .danger {
+      background: var(--gb-red);
+      color: var(--gb-paper);
+    }
+
+    .car-window {
+      position: fixed;
+      left: 50%;
+      top: 50%;
+      width: min(340px, calc(100vw - 28px));
+      display: none;
+      z-index: 5;
+      transform: translate(-50%, -50%);
+      background: var(--gb-paper);
+      border: 4px solid var(--gb-ink);
+      box-shadow: inset 0 0 0 4px var(--gb-deep), 6px 6px 0 rgba(31, 42, 22, 0.28);
+      pointer-events: auto;
+    }
+
+    .car-window.show {
+      display: block;
+    }
+
+    .window-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 9px 10px;
+      color: var(--gb-paper);
+      background: var(--gb-deep);
+      cursor: move;
+      user-select: none;
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .window-title button {
+      min-width: 28px;
+      min-height: 28px;
+      padding: 0;
+      color: var(--gb-paper);
+      background: var(--gb-red);
+      box-shadow: none;
+    }
+
+    .window-body {
+      display: grid;
+      gap: 10px;
+      padding: 14px;
+    }
+
+    .window-body label {
+      display: grid;
+      grid-template-columns: 90px 1fr;
+      gap: 8px;
+      align-items: center;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .window-body input,
+    .window-body select {
+      width: 100%;
+      min-height: 30px;
+      border: 3px solid var(--gb-ink);
+      border-radius: 0;
+      background: #fff9d8;
+      color: var(--gb-ink);
+      font: inherit;
+      font-weight: 800;
+      padding: 3px 6px;
+    }
+
+    .window-body input[type="color"] {
+      padding: 0;
+    }
+
+    @media (max-width: 760px) {
+      .hud {
+        grid-template-columns: 1fr;
+        inset: 10px 10px auto 10px;
+      }
+
+      .brand {
+        gap: 6px;
+      }
+
+      .brand h1 {
+        font-size: 18px;
+      }
+
+      .actions {
+        justify-content: flex-start;
+      }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <div class="hud">
+    <section class="panel brand">
+      <h1>四驅車賽道工房</h1>
+      <div class="status">
+        <span id="modeText">編輯</span>
+        <span id="pieceText">直線</span>
+        <span id="countText">0 件</span>
+        <span id="carCountText">1 車</span>
+        <span id="laneCountText">1 lane</span>
+        <span id="speedText">0.0 m/s</span>
+        <span id="stabilityText">穩定 100%</span>
+      </div>
+    </section>
+    <nav class="panel toolbar" aria-label="賽道零件">
+      <button data-tool="select" title="選擇"><span class="tool-icon">□</span></button>
+      <button class="active" data-tool="straight" title="直線"><span class="tool-icon">━</span></button>
+      <button data-tool="curveL" title="左彎"><span class="tool-icon">╭</span></button>
+      <button data-tool="curveR" title="右彎"><span class="tool-icon">╮</span></button>
+      <button data-tool="crossover" title="交叉轉線"><span class="tool-icon">↭</span></button>
+      <button data-tool="wave" title="波浪道"><span class="tool-icon">∿</span></button>
+      <button data-tool="start" title="起點"><span class="tool-icon">◆</span></button>
+      <button id="rotateBtn" title="旋轉"><span class="tool-icon">↻</span></button>
+      <button id="eraseBtn" title="擦除"><span class="tool-icon">⌫</span></button>
+    </nav>
+    <div class="panel actions">
+      <button id="lessCarsBtn" title="減少車"><span class="tool-icon">−</span></button>
+      <button id="moreCarsBtn" title="增加車"><span class="tool-icon">＋</span></button>
+      <button id="lessLanesBtn" title="減少 lane"><span class="tool-icon">⇤</span></button>
+      <button id="moreLanesBtn" title="增加 lane"><span class="tool-icon">⇥</span></button>
+      <button id="playBtn" class="primary">試跑</button>
+      <button id="clearBtn" class="danger" title="清空"><span class="tool-icon">×</span></button>
+    </div>
+  </div>
+  <div id="pieceActions" class="piece-actions" aria-label="已選擇賽道操作">
+    <button id="pieceRotateBtn" title="旋轉"><span class="tool-icon">↻</span></button>
+    <button id="pieceDeleteBtn" class="danger" title="刪除"><span class="tool-icon">×</span></button>
+  </div>
+  <section id="carWindow" class="car-window" aria-label="新增車子">
+    <div id="carWindowTitle" class="window-title">
+      <span>車子設定</span>
+      <button id="closeCarWindowBtn" title="關閉">×</button>
+    </div>
+    <div class="window-body">
+      <label>車殼色 <input id="carColorInput" type="color" value="#e43d30"></label>
+      <label>起步速度 <input id="carStartSpeedInput" type="range" min="2.0" max="6.0" step="0.1" value="3.8"></label>
+      <label>馬達 <input id="carMotorInput" type="range" min="2.0" max="7.0" step="0.1" value="4.1"></label>
+      <label>極速 <input id="carMaxSpeedInput" type="range" min="7.0" max="15.0" step="0.1" value="12.2"></label>
+      <button id="launchCarBtn" class="primary">出發</button>
+    </div>
+  </section>
+  <div id="toast" class="toast"></div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.0/examples/jsm/",
+        "cannon-es": "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js"
+      }
+    }
+  </script>
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

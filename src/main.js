@@ -1,0 +1,1901 @@
+    import * as THREE from 'three';
+    import * as CANNON from 'cannon-es';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { CONFIG, STORAGE_KEY, PIECES, DIRS } from './config.js';
+    import { createPixelPipeline } from './pixel-postprocess.js';
+
+    const state = {
+      mode: 'edit',
+      tool: 'straight',
+      rotation: 1,
+      erase: false,
+      selectedKey: null,
+      pieces: new Map(),
+      carPath: [],
+      trackLoops: false,
+      carCount: 1,
+      laneCount: CONFIG.defaultLaneCount,
+      carSpeed: 0,
+      carPressure: 0,
+      carStopped: false,
+      lastSlope: 0,
+      messageTimer: 0,
+    };
+
+    const canvas = document.querySelector('#game');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.shadowMap.enabled = false;
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(CONFIG.colors.sky);
+    scene.fog = new THREE.Fog(CONFIG.colors.sky, 24, 48);
+
+    const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+    camera.position.set(9, 11, 13);
+
+    const { composer, updatePixelShader } = createPixelPipeline(renderer, scene, camera, canvas);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.target.set(0, 0, 0);
+    controls.maxPolarAngle = Math.PI * 0.46;
+    controls.minDistance = 8;
+    controls.maxDistance = 28;
+
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    const hit = new THREE.Vector3();
+    const mouse = {
+      down: false,
+      moved: false,
+      placeCandidate: false,
+      startX: 0,
+      startY: 0,
+    };
+
+    const trackGroup = new THREE.Group();
+    const previewGroup = new THREE.Group();
+    const worldGroup = new THREE.Group();
+    scene.add(worldGroup, trackGroup, previewGroup);
+
+    const modeText = document.querySelector('#modeText');
+    const pieceText = document.querySelector('#pieceText');
+    const countText = document.querySelector('#countText');
+    const carCountText = document.querySelector('#carCountText');
+    const laneCountText = document.querySelector('#laneCountText');
+    const speedText = document.querySelector('#speedText');
+    const stabilityText = document.querySelector('#stabilityText');
+    const toast = document.querySelector('#toast');
+    const pieceActions = document.querySelector('#pieceActions');
+    const pieceRotateBtn = document.querySelector('#pieceRotateBtn');
+    const pieceDeleteBtn = document.querySelector('#pieceDeleteBtn');
+    const carWindow = document.querySelector('#carWindow');
+    const carWindowTitle = document.querySelector('#carWindowTitle');
+    const closeCarWindowBtn = document.querySelector('#closeCarWindowBtn');
+    const launchCarBtn = document.querySelector('#launchCarBtn');
+    const carColorInput = document.querySelector('#carColorInput');
+    const carStartSpeedInput = document.querySelector('#carStartSpeedInput');
+    const carMotorInput = document.querySelector('#carMotorInput');
+    const carMaxSpeedInput = document.querySelector('#carMaxSpeedInput');
+    const carWindowDrag = {
+      active: false,
+      offsetX: 0,
+      offsetY: 0,
+    };
+
+    const physicsWorld = new CANNON.World({
+      gravity: new CANNON.Vec3(0, 0, 0),
+    });
+    physicsWorld.allowSleep = false;
+    const carActors = [];
+
+    setupWorld();
+    setCarCount(CONFIG.defaultCarCount);
+    bindUi();
+    loadSavedTrack();
+    redrawTrack();
+    updatePreview();
+    updateHud();
+
+    let last = performance.now();
+    renderer.setAnimationLoop((now) => {
+      const dt = Math.min((now - last) / 1000, 0.05);
+      last = now;
+      resize();
+      controls.update();
+      updateCar(dt);
+      updatePixelShader();
+      updateSelectedOverlay();
+      composer.render();
+    });
+
+    function setupWorld() {
+      const size = CONFIG.gridSize * CONFIG.tile;
+      const floor = createCheckerFloor(size + 2, CONFIG.gridSize + 1);
+      floor.position.y = -0.1;
+      worldGroup.add(floor);
+
+      const table = new THREE.Mesh(
+        new THREE.BoxGeometry(size + 4, 0.7, size + 4),
+        new THREE.MeshBasicMaterial({ color: CONFIG.colors.table })
+      );
+      table.position.y = -0.55;
+      worldGroup.add(table);
+    }
+
+    function createCheckerFloor(size, cells) {
+      const geometry = new THREE.BoxGeometry(size, 0.16, size);
+      if (CONFIG.colors.floor === CONFIG.colors.floorAlt) {
+        return new THREE.Mesh(
+          geometry,
+          new THREE.MeshBasicMaterial({ color: CONFIG.colors.floor })
+        );
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = 128;
+      canvas.height = 128;
+      const ctx = canvas.getContext('2d');
+      const block = canvas.width / 8;
+      ctx.fillStyle = `#${CONFIG.colors.floor.toString(16).padStart(6, '0')}`;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = `#${CONFIG.colors.floorAlt.toString(16).padStart(6, '0')}`;
+      for (let y = 0; y < 8; y += 1) {
+        for (let x = 0; x < 8; x += 1) {
+          if ((x + y) % 2 === 0) ctx.fillRect(x * block, y * block, block, block);
+        }
+      }
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.wrapS = THREE.RepeatWrapping;
+      texture.wrapT = THREE.RepeatWrapping;
+      texture.repeat.set(cells / 2, cells / 2);
+      texture.magFilter = THREE.NearestFilter;
+      texture.minFilter = THREE.NearestFilter;
+      const material = new THREE.MeshBasicMaterial({
+        map: texture,
+        color: 0xffffff,
+      });
+      return new THREE.Mesh(geometry, material);
+    }
+
+    function bindUi() {
+      document.querySelectorAll('[data-tool]').forEach((button) => {
+        button.addEventListener('click', () => {
+          state.tool = button.dataset.tool;
+          state.erase = false;
+          state.selectedKey = null;
+          setMode('edit');
+          document.querySelectorAll('[data-tool]').forEach((btn) => btn.classList.toggle('active', btn === button));
+          document.querySelector('#eraseBtn').classList.remove('active');
+          redrawTrack();
+          updatePreview();
+          updateHud();
+          updateSelectedOverlay();
+        });
+      });
+
+      document.querySelector('#rotateBtn').addEventListener('click', () => {
+        rotateSelectionOrTool();
+        updatePreview();
+        updateSelectedOverlay();
+      });
+
+      document.querySelector('#eraseBtn').addEventListener('click', () => {
+        state.erase = !state.erase;
+        if (state.erase) state.selectedKey = null;
+        setMode('edit');
+        document.querySelector('#eraseBtn').classList.toggle('active', state.erase);
+        redrawTrack();
+        updatePreview();
+        updateHud();
+        updateSelectedOverlay();
+      });
+
+      pieceRotateBtn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        rotateSelectionOrTool();
+        updatePreview();
+        updateSelectedOverlay();
+      });
+
+      pieceDeleteBtn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        deleteSelectedPiece();
+      });
+
+      document.querySelector('#playBtn').addEventListener('click', () => {
+        if (state.mode === 'drive') {
+          setMode('edit');
+          return;
+        }
+        startDrive();
+      });
+
+      document.querySelector('#lessCarsBtn').addEventListener('click', () => {
+        setCarCount(state.carCount - 1);
+        updateHud();
+      });
+
+      document.querySelector('#moreCarsBtn').addEventListener('click', () => {
+        openCarWindow();
+      });
+
+      closeCarWindowBtn.addEventListener('click', () => closeCarWindow());
+      launchCarBtn.addEventListener('click', () => launchConfiguredCar());
+      carWindowTitle.addEventListener('pointerdown', startCarWindowDrag);
+      window.addEventListener('pointermove', dragCarWindow);
+      window.addEventListener('pointerup', stopCarWindowDrag);
+
+      document.querySelector('#lessLanesBtn').addEventListener('click', () => {
+        setLaneCount(state.laneCount - 1);
+      });
+
+      document.querySelector('#moreLanesBtn').addEventListener('click', () => {
+        setLaneCount(state.laneCount + 1);
+      });
+
+      document.querySelector('#clearBtn').addEventListener('click', () => {
+        state.pieces.clear();
+        state.selectedKey = null;
+        saveTrack();
+        redrawTrack();
+        setMode('edit');
+        updateHud();
+        updateSelectedOverlay();
+        showToast('清空完成');
+      });
+
+      renderer.domElement.addEventListener('pointermove', onPointerMove);
+      renderer.domElement.addEventListener('pointerdown', (event) => {
+        setPointerFromEvent(event);
+        renderer.domElement.setPointerCapture(event.pointerId);
+        mouse.down = true;
+        mouse.moved = false;
+        mouse.placeCandidate = event.button === 0 && state.mode === 'edit';
+        mouse.startX = event.clientX;
+        mouse.startY = event.clientY;
+      });
+      renderer.domElement.addEventListener('pointerup', (event) => {
+        setPointerFromEvent(event);
+        const dx = event.clientX - mouse.startX;
+        const dy = event.clientY - mouse.startY;
+        const isClick = Math.hypot(dx, dy) < 6;
+        if (mouse.placeCandidate && isClick && state.mode === 'edit') placeAtPointer();
+        mouse.down = false;
+        mouse.placeCandidate = false;
+        if (renderer.domElement.hasPointerCapture(event.pointerId)) {
+          renderer.domElement.releasePointerCapture(event.pointerId);
+        }
+      });
+      renderer.domElement.addEventListener('pointercancel', (event) => {
+        mouse.down = false;
+        mouse.placeCandidate = false;
+        if (renderer.domElement.hasPointerCapture(event.pointerId)) {
+          renderer.domElement.releasePointerCapture(event.pointerId);
+        }
+      });
+      window.addEventListener('keydown', (event) => {
+        if (event.key.toLowerCase() === 'r') {
+          rotateSelectionOrTool();
+          updatePreview();
+        }
+        if (event.key === 'Escape') setMode('edit');
+        if (event.key === ' ') {
+          event.preventDefault();
+          state.mode === 'drive' ? setMode('edit') : startDrive();
+        }
+      });
+    }
+
+    function setMode(mode) {
+      state.mode = mode;
+      carActors.forEach((actor) => {
+        actor.mesh.visible = mode === 'drive';
+      });
+      previewGroup.visible = mode === 'edit';
+      document.querySelector('#playBtn').textContent = mode === 'drive' ? '編輯' : '試跑';
+      updateHud();
+    }
+
+    function setCarCount(count) {
+      const nextCount = THREE.MathUtils.clamp(count, 1, CONFIG.maxCarCount);
+      state.carCount = nextCount;
+      while (carActors.length < nextCount) {
+        carActors.push(createCarActor(carActors.length));
+      }
+      while (carActors.length > nextCount) {
+        const actor = carActors.pop();
+        scene.remove(actor.mesh);
+        physicsWorld.removeBody(actor.body);
+      }
+      carActors.forEach((actor) => {
+        actor.mesh.visible = state.mode === 'drive';
+      });
+      if (state.mode === 'drive') setMode('edit');
+    }
+
+    function addConfiguredCar(options = {}) {
+      if (carActors.length >= CONFIG.maxCarCount) {
+        showToast('車庫已滿');
+        return null;
+      }
+      const actor = createCarActor(carActors.length, options);
+      carActors.push(actor);
+      state.carCount = carActors.length;
+      updateHud();
+      return actor;
+    }
+
+    function setLaneCount(count) {
+      state.laneCount = THREE.MathUtils.clamp(count, 1, CONFIG.maxLaneCount);
+      carActors.forEach((actor, index) => {
+        actor.laneIndex = index % state.laneCount;
+      });
+      redrawTrack();
+      saveTrack();
+      updatePreview();
+      updateHud();
+      if (state.mode === 'drive') setMode('edit');
+    }
+
+    function openCarWindow() {
+      if (!carWindow) return;
+      if (carActors.length >= CONFIG.maxCarCount) {
+        showToast('車庫已滿');
+        return;
+      }
+      carWindow.classList.add('show');
+    }
+
+    function closeCarWindow() {
+      carWindow?.classList.remove('show');
+      carWindowDrag.active = false;
+    }
+
+    function startCarWindowDrag(event) {
+      if (event.target.closest('button')) return;
+      const rect = carWindow.getBoundingClientRect();
+      carWindowDrag.active = true;
+      carWindowDrag.offsetX = event.clientX - rect.left;
+      carWindowDrag.offsetY = event.clientY - rect.top;
+      carWindow.setPointerCapture?.(event.pointerId);
+    }
+
+    function dragCarWindow(event) {
+      if (!carWindowDrag.active) return;
+      carWindow.style.left = `${event.clientX - carWindowDrag.offsetX}px`;
+      carWindow.style.top = `${event.clientY - carWindowDrag.offsetY}px`;
+      carWindow.style.transform = 'none';
+    }
+
+    function stopCarWindowDrag() {
+      carWindowDrag.active = false;
+    }
+
+    function launchConfiguredCar() {
+      const actor = addConfiguredCar({
+        color: Number.parseInt(carColorInput.value.slice(1), 16),
+        startSpeed: Number(carStartSpeedInput.value),
+        motorAccel: Number(carMotorInput.value),
+        maxSpeed: Number(carMaxSpeedInput.value),
+      });
+      if (!actor) return;
+      closeCarWindow();
+      if (state.mode === 'drive' && state.carPath.length > 2) {
+        launchActorOnCurrentTrack(actor, carActors.length - 1);
+        showToast('新車出發');
+        return;
+      }
+      const path = buildDrivePath();
+      if (path.length >= 3) {
+        startDrive();
+      } else {
+        showToast('已加入車庫');
+      }
+    }
+
+    function createCarActor(index, options = {}) {
+      const mesh = createCar(index, options);
+      const params = {
+        startSpeed: options.startSpeed ?? CONFIG.physics.startSpeed,
+        motorAccel: options.motorAccel ?? CONFIG.physics.motorAccel,
+        maxSpeed: options.maxSpeed ?? CONFIG.physics.maxSpeed,
+      };
+      mesh.visible = false;
+      scene.add(mesh);
+      const body = new CANNON.Body({
+        mass: 1,
+        shape: new CANNON.Sphere(CONFIG.physics.carRadius),
+        position: new CANNON.Vec3(0, 0, 0),
+        linearDamping: 0.16,
+        angularDamping: 0.85,
+      });
+      body.collisionResponse = true;
+      physicsWorld.addBody(body);
+      return {
+        index,
+        mesh,
+        body,
+        targetIndex: 1,
+        speed: 0,
+        pressure: 0,
+        stopped: false,
+        finished: false,
+        laneIndex: index % state.laneCount,
+        lanePath: [],
+        lowSpeedTime: 0,
+        params,
+      };
+    }
+
+    function rotateSelectionOrTool() {
+      if (state.tool === 'select' && state.selectedKey && state.pieces.has(state.selectedKey)) {
+        const piece = state.pieces.get(state.selectedKey);
+        piece.rotation = (piece.rotation + 1) % 4;
+        state.rotation = piece.rotation;
+        redrawTrack();
+        saveTrack();
+        updateHud();
+        updateSelectedOverlay();
+        return;
+      }
+      state.rotation = (state.rotation + 1) % 4;
+      updatePreview();
+    }
+
+    function deleteSelectedPiece() {
+      if (!state.selectedKey || !state.pieces.has(state.selectedKey)) return;
+      state.pieces.delete(state.selectedKey);
+      state.selectedKey = null;
+      redrawTrack();
+      saveTrack();
+      updatePreview();
+      updateHud();
+      updateSelectedOverlay();
+    }
+
+    function onPointerMove(event) {
+      setPointerFromEvent(event);
+      if (mouse.down && Math.hypot(event.clientX - mouse.startX, event.clientY - mouse.startY) >= 6) {
+        mouse.moved = true;
+      }
+      updatePreview();
+    }
+
+    function setPointerFromEvent(event) {
+      const rect = renderer.domElement.getBoundingClientRect();
+      pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    }
+
+    function placeAtPointer() {
+      const cell = pointerToCell();
+      if (!cell) return;
+      const { x, z } = cell;
+      const key = cellKey(x, z);
+      if (state.tool === 'select') {
+        const hitPiece = findPieceAtCell(x, z);
+        state.selectedKey = hitPiece ? cellKey(hitPiece.x, hitPiece.z) : null;
+        if (hitPiece) state.rotation = hitPiece.rotation;
+        redrawTrack();
+        updatePreview();
+        updateHud();
+        updateSelectedOverlay();
+        return;
+      }
+      if (state.erase) {
+        const hitPiece = findPieceAtCell(x, z);
+        if (hitPiece) {
+          const hitKey = cellKey(hitPiece.x, hitPiece.z);
+          state.pieces.delete(hitKey);
+          if (state.selectedKey === hitKey) state.selectedKey = null;
+        }
+      } else {
+        if (Math.abs(x) > Math.floor(CONFIG.gridSize / 2) || Math.abs(z) > Math.floor(CONFIG.gridSize / 2)) return;
+        const hitPiece = findPieceAtCell(x, z);
+        if (hitPiece) {
+          showToast('這裡已有賽道');
+          return;
+        }
+        if (state.tool === 'start') {
+          [...state.pieces.entries()].forEach(([pieceKey, piece]) => {
+            if (piece.type === 'start') state.pieces.delete(pieceKey);
+          });
+        }
+        if (!canPlacePiece({ x, z, type: state.tool, rotation: state.rotation })) {
+          showToast('位置已被其他賽道佔用');
+          return;
+        }
+        state.pieces.set(key, { x, z, type: state.tool, rotation: state.rotation });
+        state.selectedKey = null;
+      }
+      redrawTrack();
+      saveTrack();
+      updateHud();
+      updateSelectedOverlay();
+    }
+
+    function saveTrack() {
+      const pieces = [...state.pieces.values()].map(({ x, z, type, rotation }) => ({ x, z, type, rotation }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ pieces, laneCount: state.laneCount }));
+    }
+
+    function loadSavedTrack() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return;
+        const data = JSON.parse(raw);
+        if (!Array.isArray(data?.pieces)) return;
+        if (Number.isInteger(data.laneCount)) {
+          state.laneCount = THREE.MathUtils.clamp(data.laneCount, 1, CONFIG.maxLaneCount);
+        }
+        state.pieces.clear();
+        data.pieces.forEach((piece) => {
+          if (!PIECES[piece.type]) return;
+          if (!Number.isInteger(piece.x) || !Number.isInteger(piece.z)) return;
+          const rotation = Number.isInteger(piece.rotation) ? ((piece.rotation % 4) + 4) % 4 : 0;
+          const loadedPiece = {
+            x: piece.x,
+            z: piece.z,
+            type: piece.type,
+            rotation,
+          };
+          if (canPlacePiece(loadedPiece)) {
+            state.pieces.set(cellKey(piece.x, piece.z), loadedPiece);
+          }
+        });
+        if (state.pieces.size > 0) showToast('已載入上次編輯的賽道');
+      } catch {
+        localStorage.removeItem(STORAGE_KEY);
+      }
+    }
+
+    function getTrackWidth() {
+      return getLaneWidth() * state.laneCount;
+    }
+
+    function getLaneWidth() {
+      const maxWidthForCurve = CONFIG.tile - CONFIG.railWidth * 2 - 0.18;
+      return Math.min(CONFIG.laneWidth, maxWidthForCurve / state.laneCount);
+    }
+
+    function getLaneOffset(laneIndex) {
+      return getLaneOffsetForFloat(laneIndex);
+    }
+
+    function getLaneOffsetForFloat(laneFloat) {
+      return (laneFloat - (state.laneCount - 1) * 0.5) * getLaneWidth();
+    }
+
+    function getPieceCellLength(type) {
+      return type === 'crossover' ? 2 : 1;
+    }
+
+    function getPieceWorldLength(type) {
+      return CONFIG.tile * getPieceCellLength(type);
+    }
+
+    function getPieceLocalCenterZ(type) {
+      return -CONFIG.tile * (getPieceCellLength(type) - 1) * 0.5;
+    }
+
+    function getPieceFootprint(piece) {
+      const dir = DIRS[piece.rotation];
+      const cells = [];
+      for (let i = 0; i < getPieceCellLength(piece.type); i += 1) {
+        cells.push({ x: piece.x + dir.x * i, z: piece.z + dir.y * i });
+      }
+      return cells;
+    }
+
+    function findPieceAtCell(x, z) {
+      for (const piece of state.pieces.values()) {
+        if (getPieceFootprint(piece).some((cell) => cell.x === x && cell.z === z)) return piece;
+      }
+      return null;
+    }
+
+    function canPlacePiece(piece) {
+      const limit = Math.floor(CONFIG.gridSize / 2);
+      return getPieceFootprint(piece).every((cell) => {
+        if (Math.abs(cell.x) > limit || Math.abs(cell.z) > limit) return false;
+        const occupant = findPieceAtCell(cell.x, cell.z);
+        return !occupant || cellKey(occupant.x, occupant.z) === cellKey(piece.x, piece.z);
+      });
+    }
+
+    function pointerToCell() {
+      raycaster.setFromCamera(pointer, camera);
+      if (!raycaster.ray.intersectPlane(plane, hit)) return null;
+      const x = Math.round(hit.x / CONFIG.tile);
+      const z = Math.round(hit.z / CONFIG.tile);
+      return { x, z };
+    }
+
+    function updatePreview() {
+      previewGroup.clear();
+      const cell = pointerToCell();
+      if (!cell || state.mode !== 'edit') return;
+      if (state.tool === 'select') return;
+      const key = cellKey(cell.x, cell.z);
+      const piece = state.erase
+        ? makeEraseMarker()
+        : createTrackPiece({ type: state.tool, rotation: state.rotation }, true);
+      piece.position.set(cell.x * CONFIG.tile, 0.07, cell.z * CONFIG.tile);
+      if (!state.erase && !canPlacePiece({ x: cell.x, z: cell.z, type: state.tool, rotation: state.rotation })) {
+        tintGroup(piece, CONFIG.colors.previewBad, 0.5);
+      }
+      previewGroup.add(piece);
+    }
+
+    function redrawTrack() {
+      trackGroup.clear();
+      state.pieces.forEach((piece) => {
+        const selected = cellKey(piece.x, piece.z) === state.selectedKey;
+        const mesh = createTrackPiece(piece, false, selected);
+        mesh.position.set(piece.x * CONFIG.tile, 0, piece.z * CONFIG.tile);
+        trackGroup.add(mesh);
+      });
+    }
+
+    function createTrackPiece(piece, preview = false, selected = false) {
+      const group = new THREE.Group();
+      const color = selected ? CONFIG.colors.selected : preview ? CONFIG.colors.previewOk : PIECES[piece.type].color;
+      const trackWidth = getTrackWidth();
+      const mat = new THREE.MeshBasicMaterial({
+        color,
+        transparent: preview,
+        opacity: preview ? 0.55 : 1,
+        side: THREE.DoubleSide,
+      });
+      const railMat = new THREE.MeshBasicMaterial({
+        color: CONFIG.colors.rail,
+        transparent: preview,
+        opacity: preview ? 0.55 : 1,
+        side: THREE.DoubleSide,
+      });
+
+      if (piece.type === 'curveL' || piece.type === 'curveR') {
+        const geometry = createCurveGeometry(piece.type);
+        const deck = new THREE.Mesh(geometry, mat);
+        group.add(deck);
+
+        for (const side of [-1, 1]) {
+          const rail = new THREE.Mesh(createCurveRailGeometry(piece.type, side), railMat);
+          group.add(rail);
+        }
+        for (let lane = 1; lane < state.laneCount; lane += 1) {
+          const marker = new THREE.Mesh(createCurveLaneMarkerGeometry(piece.type, lane), railMat);
+          group.add(marker);
+        }
+      } else {
+        const pieceLength = getPieceWorldLength(piece.type);
+        const pieceCenterZ = getPieceLocalCenterZ(piece.type);
+        const deck = new THREE.Mesh(
+          new THREE.BoxGeometry(trackWidth, CONFIG.trackHeight, pieceLength),
+          mat
+        );
+        deck.position.y = CONFIG.trackHeight * 0.5;
+        deck.position.z = pieceCenterZ;
+        group.add(deck);
+
+        if (isLaneTransitionPiece(piece.type)) {
+          group.add(createLaneTransitionRails(piece.type, deck.position.y, railMat, mat));
+        } else {
+          for (const side of [-1, 1]) {
+          const rail = new THREE.Mesh(
+            new THREE.BoxGeometry(CONFIG.railWidth, CONFIG.railHeight, pieceLength),
+            railMat
+          );
+          rail.position.set(
+            side * trackWidth * 0.5,
+            deck.position.y + CONFIG.railBaseOffset,
+            pieceCenterZ
+          );
+            group.add(rail);
+          }
+          for (let lane = 1; lane < state.laneCount; lane += 1) {
+            group.add(createStraightDivider(lane, deck.position.y, railMat));
+          }
+        }
+      }
+
+      if (piece.type === 'start') {
+        const gateMat = new THREE.MeshBasicMaterial({ color: CONFIG.colors.accent });
+        for (const side of [-1, 1]) {
+          const post = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.15, 0.12), gateMat);
+          post.position.set(side * (trackWidth * 0.5 + 0.28), 0.68, -0.35);
+          group.add(post);
+        }
+        const topBar = new THREE.Mesh(new THREE.BoxGeometry(trackWidth + 0.78, 0.12, 0.12), gateMat);
+        topBar.position.set(0, 1.25, -0.35);
+        group.add(topBar);
+      }
+
+      group.rotation.y = -piece.rotation * Math.PI * 0.5;
+      return group;
+    }
+
+    function createStraightDivider(lane, deckY, railMat) {
+      const trackWidth = getTrackWidth();
+      const divider = new THREE.Mesh(
+        new THREE.BoxGeometry(CONFIG.railWidth, CONFIG.railHeight, CONFIG.tile),
+        railMat
+      );
+      divider.position.set(
+        -trackWidth * 0.5 + lane * getLaneWidth(),
+        deckY + CONFIG.railBaseOffset,
+        0
+      );
+      return divider;
+    }
+
+    function isLaneTransitionPiece(type) {
+      return type === 'crossover' || type === 'wave';
+    }
+
+    function createLaneTransitionRails(type, deckY, railMat, deckMat) {
+      const group = new THREE.Group();
+      const railY = deckY + CONFIG.railBaseOffset;
+      const routeMat = new THREE.MeshBasicMaterial({
+        color: type === 'crossover' ? CONFIG.colors.crossover : CONFIG.colors.track,
+      });
+
+      for (let lane = 0; lane < state.laneCount; lane += 1) {
+        const center = createLaneLocalPath(type, lane, 36, 0);
+        const strip = createPathSegments(
+          center,
+          deckY + CONFIG.trackHeight * 0.5 + 0.012,
+          routeMat,
+          {
+            width: getTransitionLaneSurfaceWidth(type),
+            height: 0.018,
+            yOffset: (t) => getLaneVerticalOffset(type, lane, getLaneEndForPiece(type, lane), t),
+          }
+        );
+        group.add(strip);
+
+        if (type !== 'crossover' || state.laneCount < 3) {
+          for (const side of [-0.5, 0.5]) {
+            const sidePath = createLaneLocalPath(type, lane, 36, side);
+            group.add(createPathSegments(
+              sidePath,
+              railY,
+              railMat,
+              {
+                width: CONFIG.railWidth,
+                height: CONFIG.railHeight,
+                yOffset: (t) => getLaneVerticalOffset(type, lane, getLaneEndForPiece(type, lane), t),
+              }
+            ));
+          }
+        }
+      }
+
+      if (type === 'crossover' && state.laneCount >= 3) {
+        createCrossoverRailSpecs().forEach((spec) => {
+          group.add(createPathSegments(
+            createCrossoverRailPath(spec),
+            railY,
+            railMat,
+            {
+              width: CONFIG.railWidth,
+              height: CONFIG.railHeight,
+              yOffset: spec.raised ? (t) => Math.sin(Math.PI * t) * 0.58 : undefined,
+            }
+          ));
+        });
+        const shadow = new THREE.Mesh(
+          new THREE.BoxGeometry(getLaneWidth() * 1.15, 0.035, CONFIG.tile * 0.42),
+          deckMat
+        );
+        shadow.position.set(getLaneOffsetForFloat(1), deckY + CONFIG.trackHeight * 0.5 + 0.025, getPieceLocalCenterZ(type));
+        group.add(shadow);
+      }
+
+      return group;
+    }
+
+    function getTransitionLaneSurfaceWidth(type) {
+      if (state.laneCount <= 1) return getLaneWidth() * 0.72;
+      if (type === 'crossover') return Math.max(0.18, getLaneWidth() - CONFIG.railWidth * 0.95);
+      return Math.max(0.18, getLaneWidth() - CONFIG.railWidth * 1.25);
+    }
+
+    function createCrossoverRailSpecs() {
+      return [
+        { start: -0.5, end: state.laneCount - 1.5, raised: true, wave: -0.26 },
+        { start: 0.5, end: state.laneCount - 0.5, raised: true, wave: -0.26 },
+        { start: 0.5, end: -0.5, raised: false, wave: 0.22 },
+        { start: 1.5, end: 0.5, raised: false, wave: 0.24 },
+        { start: 2.5, end: 1.5, raised: false, wave: 0.22 },
+      ];
+    }
+
+    function createCrossoverRailPath(spec, segments = 48) {
+      const length = getPieceWorldLength('crossover');
+      const points = [];
+      for (let i = 0; i <= segments; i += 1) {
+        const t = i / segments;
+        const eased = t * t * (3 - 2 * t);
+        const wave = Math.sin(Math.PI * 2 * t) * spec.wave;
+        points.push({
+          x: getLaneOffsetForFloat(THREE.MathUtils.lerp(spec.start, spec.end, eased) + wave),
+          z: CONFIG.tile * 0.5 - length * t,
+          t,
+        });
+      }
+      return points;
+    }
+
+    function createLaneLocalPath(type, lane, segments, sideFloat = 0) {
+      const laneEnd = getLaneEndForPiece(type, lane);
+      const length = getPieceWorldLength(type);
+      const points = [];
+      for (let i = 0; i <= segments; i += 1) {
+        const t = i / segments;
+        const laneFloat = getLaneFloatForPiece(type, lane, laneEnd, t) + sideFloat;
+        points.push({
+          x: getLaneOffsetForFloat(laneFloat),
+          z: CONFIG.tile * 0.5 - length * t,
+          t,
+        });
+      }
+      return points;
+    }
+
+    function createPathSegments(points, baseY, material, options = {}) {
+      const width = options.width ?? CONFIG.railWidth;
+      const height = options.height ?? CONFIG.railHeight;
+      const yOffset = options.yOffset ?? (() => 0);
+      const omit = options.omit ?? (() => false);
+      const visibleChunks = [];
+      let chunk = [];
+      points.forEach((point) => {
+        if (omit(point.t)) {
+          if (chunk.length > 1) visibleChunks.push(chunk);
+          chunk = [];
+          return;
+        }
+        chunk.push(point);
+      });
+      if (chunk.length > 1) visibleChunks.push(chunk);
+      if (visibleChunks.length !== 1 || visibleChunks[0].length !== points.length) {
+        const group = new THREE.Group();
+        visibleChunks.forEach((visiblePoints) => {
+          group.add(new THREE.Mesh(
+            createPathRibbonGeometry(visiblePoints, width, height, baseY, yOffset),
+            material
+          ));
+        });
+        group.traverse((child) => {
+          if (child.isMesh) {
+          }
+        });
+        return group;
+      }
+      const mesh = new THREE.Mesh(
+        createPathRibbonGeometry(points, width, height, baseY, yOffset),
+        material
+      );
+      return mesh;
+    }
+
+    function createPathRibbonGeometry(points, width, height, baseY, yOffset) {
+      const vertices = [];
+      const indices = [];
+      const halfWidth = width * 0.5;
+      const halfHeight = height * 0.5;
+
+      points.forEach((point, index) => {
+        const prev = points[Math.max(0, index - 1)];
+        const next = points[Math.min(points.length - 1, index + 1)];
+        let dx = next.x - prev.x;
+        let dz = next.z - prev.z;
+        const length = Math.hypot(dx, dz) || 1;
+        dx /= length;
+        dz /= length;
+        const nx = dz;
+        const nz = -dx;
+        const y = baseY + yOffset(point.t);
+        const leftX = point.x - nx * halfWidth;
+        const leftZ = point.z - nz * halfWidth;
+        const rightX = point.x + nx * halfWidth;
+        const rightZ = point.z + nz * halfWidth;
+        vertices.push(
+          leftX, y + halfHeight, leftZ,
+          rightX, y + halfHeight, rightZ,
+          leftX, y - halfHeight, leftZ,
+          rightX, y - halfHeight, rightZ
+        );
+      });
+
+      for (let i = 0; i < points.length - 1; i += 1) {
+        const a = i * 4;
+        const b = (i + 1) * 4;
+        indices.push(a, b, a + 1, a + 1, b, b + 1);
+        indices.push(a + 2, a + 3, b + 2, a + 3, b + 3, b + 2);
+        indices.push(a, a + 2, b, a + 2, b + 2, b);
+        indices.push(a + 1, b + 1, a + 3, a + 3, b + 1, b + 3);
+      }
+
+      const first = 0;
+      const last = (points.length - 1) * 4;
+      indices.push(first, first + 1, first + 2, first + 1, first + 3, first + 2);
+      indices.push(last, last + 2, last + 1, last + 1, last + 2, last + 3);
+
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+      geometry.setIndex(indices);
+      geometry.computeVertexNormals();
+      return geometry;
+    }
+
+    function createCurveGeometry(type) {
+      const radius = CONFIG.tile * 0.5;
+      const halfWidth = getTrackWidth() * 0.5;
+      return createQuarterRingGeometry(type, radius - halfWidth, radius + halfWidth, CONFIG.trackHeight, 28);
+    }
+
+    function createCurveRailGeometry(type, side) {
+      const radius = CONFIG.tile * 0.5;
+      const halfWidth = getTrackWidth() * 0.5;
+      const railRadius = side < 0 ? radius - halfWidth : radius + halfWidth;
+      const railBottom = CONFIG.trackHeight * 0.5 + CONFIG.railBaseOffset - CONFIG.railHeight * 0.5;
+      return createQuarterRingGeometry(
+        type,
+        railRadius - CONFIG.railWidth * 0.5,
+        railRadius + CONFIG.railWidth * 0.5,
+        CONFIG.railHeight,
+        28,
+        railBottom
+      );
+    }
+
+    function createCurveLaneMarkerGeometry(type, lane) {
+      const laneRadius = CONFIG.tile * 0.5 - getTrackWidth() * 0.5 + lane * getLaneWidth();
+      return createQuarterRingGeometry(
+        type,
+        laneRadius - CONFIG.railWidth * 0.5,
+        laneRadius + CONFIG.railWidth * 0.5,
+        CONFIG.railHeight,
+        28,
+        CONFIG.trackHeight * 0.5 + CONFIG.railBaseOffset - CONFIG.railHeight * 0.5
+      );
+    }
+
+    function createQuarterRingGeometry(type, innerRadius, outerRadius, height, segments, yOffset = 0) {
+      const centerX = type === 'curveL' ? -CONFIG.tile * 0.5 : CONFIG.tile * 0.5;
+      const centerZ = CONFIG.tile * 0.5;
+      const start = type === 'curveL' ? 0 : Math.PI;
+      const end = type === 'curveL' ? -Math.PI * 0.5 : Math.PI * 1.5;
+      const outer = [];
+      const inner = [];
+
+      for (let i = 0; i <= segments; i += 1) {
+        const t = i / segments;
+        const angle = start + (end - start) * t;
+        outer.push(new THREE.Vector2(centerX + Math.cos(angle) * outerRadius, centerZ + Math.sin(angle) * outerRadius));
+        inner.push(new THREE.Vector2(centerX + Math.cos(angle) * innerRadius, centerZ + Math.sin(angle) * innerRadius));
+      }
+
+      const vertices = [];
+      const indices = [];
+      outer.forEach((point) => vertices.push(point.x, yOffset + height, point.y));
+      inner.forEach((point) => vertices.push(point.x, yOffset + height, point.y));
+      outer.forEach((point) => vertices.push(point.x, yOffset, point.y));
+      inner.forEach((point) => vertices.push(point.x, yOffset, point.y));
+
+      const topOuter = 0;
+      const topInner = segments + 1;
+      const bottomOuter = (segments + 1) * 2;
+      const bottomInner = (segments + 1) * 3;
+
+      for (let i = 0; i < segments; i += 1) {
+        indices.push(topOuter + i, topOuter + i + 1, topInner + i);
+        indices.push(topOuter + i + 1, topInner + i + 1, topInner + i);
+        indices.push(bottomOuter + i + 1, bottomOuter + i, bottomInner + i);
+        indices.push(bottomInner + i + 1, bottomOuter + i + 1, bottomInner + i);
+        indices.push(topOuter + i + 1, topOuter + i, bottomOuter + i);
+        indices.push(bottomOuter + i + 1, topOuter + i + 1, bottomOuter + i);
+        indices.push(topInner + i, topInner + i + 1, bottomInner + i);
+        indices.push(topInner + i + 1, bottomInner + i + 1, bottomInner + i);
+      }
+
+      for (const i of [0, segments]) {
+        indices.push(topOuter + i, topInner + i, bottomOuter + i);
+        indices.push(topInner + i, bottomInner + i, bottomOuter + i);
+      }
+
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+      geometry.setIndex(indices);
+      geometry.computeVertexNormals();
+      return geometry;
+    }
+
+    function createCar(index = 0, options = {}) {
+      const group = new THREE.Group();
+      const bodyColor = options.color ?? CONFIG.colors.cars[index % CONFIG.colors.cars.length];
+      const black = 0x050604;
+      const chassisMat = new THREE.MeshBasicMaterial({ color: black });
+      const bodyMat = new THREE.MeshBasicMaterial({ color: bodyColor });
+      const trimMat = new THREE.MeshBasicMaterial({ color: black });
+      const stripeMat = new THREE.MeshBasicMaterial({ color: 0xf4bf3a });
+      const darkMat = new THREE.MeshBasicMaterial({ color: black });
+      const wheelMat = new THREE.MeshBasicMaterial({ color: black });
+      const hubMat = new THREE.MeshBasicMaterial({ color: black });
+
+      const chassis = new THREE.Mesh(new THREE.BoxGeometry(0.64, 0.08, 1.18), chassisMat);
+      chassis.position.y = 0.27;
+      group.add(chassis);
+
+      const frontBumper = new THREE.Mesh(new THREE.BoxGeometry(0.92, 0.05, 0.14), trimMat);
+      frontBumper.position.set(0, 0.29, -0.66);
+      group.add(frontBumper);
+
+      const rearStay = new THREE.Mesh(new THREE.BoxGeometry(0.84, 0.05, 0.12), trimMat);
+      rearStay.position.set(0, 0.31, 0.58);
+      group.add(rearStay);
+
+      const shell = new THREE.Group();
+      const mainShell = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.22, 0.72), bodyMat);
+      mainShell.position.y = 0.45;
+      shell.add(mainShell);
+
+      const nose = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.14, 0.38), bodyMat);
+      nose.position.set(0, 0.4, -0.48);
+      nose.rotation.x = -0.18;
+      shell.add(nose);
+
+      const cockpit = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.2, 0.24), darkMat);
+      cockpit.position.set(0, 0.62, -0.08);
+      cockpit.rotation.x = -0.1;
+      shell.add(cockpit);
+
+      const canopyHighlight = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.035, 0.16), trimMat);
+      canopyHighlight.position.set(0, 0.735, -0.12);
+      shell.add(canopyHighlight);
+
+      const centerStripe = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.035, 0.64), stripeMat);
+      centerStripe.position.set(0, 0.585, -0.18);
+      centerStripe.rotation.x = -0.08;
+      shell.add(centerStripe);
+
+      const engineCover = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.15, 0.26), bodyMat);
+      engineCover.position.set(0, 0.56, 0.29);
+      engineCover.rotation.x = 0.12;
+      shell.add(engineCover);
+
+      for (const x of [-0.12, 0, 0.12]) {
+        const vent = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.025, 0.18), darkMat);
+        vent.position.set(x, 0.65, 0.26);
+        shell.add(vent);
+      }
+      for (const x of [-0.31, 0.31]) {
+        const sidePod = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.12, 0.42), bodyMat);
+        sidePod.position.set(x, 0.39, 0.14);
+        sidePod.rotation.z = x < 0 ? 0.16 : -0.16;
+        shell.add(sidePod);
+      }
+      group.add(shell);
+
+      const wingDeck = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.06, 0.28), bodyMat);
+      wingDeck.position.set(0, 0.72, 0.63);
+      wingDeck.rotation.x = 0.16;
+      group.add(wingDeck);
+
+      const wingStripe = new THREE.Mesh(new THREE.BoxGeometry(0.54, 0.025, 0.05), stripeMat);
+      wingStripe.position.set(0, 0.765, 0.55);
+      wingStripe.rotation.x = 0.16;
+      group.add(wingStripe);
+
+      for (const x of [-0.4, 0.4]) {
+        const wingPlate = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.26, 0.26), trimMat);
+        wingPlate.position.set(x, 0.75, 0.63);
+        wingPlate.rotation.z = x < 0 ? -0.18 : 0.18;
+        group.add(wingPlate);
+      }
+
+      for (const x of [-0.38, 0.38]) {
+        for (const z of [-0.36, 0.38]) {
+          const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.17, 0.13, 14), wheelMat);
+          wheel.rotation.z = Math.PI * 0.5;
+          wheel.position.set(x, 0.28, z);
+          group.add(wheel);
+
+          const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.085, 0.145, 10), hubMat);
+          hub.rotation.z = Math.PI * 0.5;
+          hub.position.copy(wheel.position);
+          group.add(hub);
+        }
+      }
+
+      for (const x of [-0.52, 0.52]) {
+        for (const z of [-0.64, 0.62]) {
+          const stay = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.035, 0.055), trimMat);
+          stay.position.set(x * 0.78, 0.34, z);
+          stay.rotation.y = x < 0 ? -0.24 : 0.24;
+          group.add(stay);
+
+          const roller = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 0.035, 16), trimMat);
+          roller.rotation.x = Math.PI * 0.5;
+          roller.position.set(x, 0.36, z);
+          group.add(roller);
+
+          const rollerCap = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.032, 0.04, 10), darkMat);
+          rollerCap.rotation.x = Math.PI * 0.5;
+          rollerCap.position.copy(roller.position);
+          group.add(rollerCap);
+        }
+      }
+
+      const visual = new THREE.Group();
+      while (group.children.length > 0) {
+        visual.add(group.children[0]);
+      }
+      visual.rotation.y = Math.PI;
+      group.add(visual);
+      group.scale.setScalar(CONFIG.carScale);
+      return group;
+    }
+
+    function makeEraseMarker() {
+      const group = new THREE.Group();
+      const mat = new THREE.MeshBasicMaterial({ color: CONFIG.colors.previewBad, transparent: true, opacity: 0.62 });
+      const a = new THREE.Mesh(new THREE.BoxGeometry(CONFIG.tile * 0.9, 0.08, 0.16), mat);
+      const b = new THREE.Mesh(new THREE.BoxGeometry(CONFIG.tile * 0.9, 0.08, 0.16), mat);
+      a.rotation.y = Math.PI / 4;
+      b.rotation.y = -Math.PI / 4;
+      a.position.y = b.position.y = 0.2;
+      group.add(a, b);
+      return group;
+    }
+
+    function startDrive() {
+      const path = buildDrivePath();
+      if (path.length < 3) {
+        showToast('需要起點和相連的賽道');
+        return;
+      }
+      state.carPath = path;
+      state.carSpeed = CONFIG.physics.startSpeed;
+      state.carPressure = 0;
+      state.carStopped = false;
+      state.lastSlope = 0;
+      state.selectedKey = null;
+      redrawTrack();
+      const startDir = path[1].pos.clone().sub(path[0].pos).normalize();
+      carActors.forEach((actor, index) => {
+        launchActorOnPath(actor, index, path, startDir);
+      });
+      setMode('drive');
+      showToast(`${state.carCount} 台車 Cannon 物理試跑開始`);
+    }
+
+    function launchActorOnCurrentTrack(actor, index) {
+      const path = state.carPath.length > 2 ? state.carPath : buildDrivePath();
+      if (path.length < 3) return;
+      state.carPath = path;
+      const startDir = path[1].pos.clone().sub(path[0].pos).normalize();
+      launchActorOnPath(actor, index, path, startDir);
+      actor.mesh.visible = true;
+      state.carStopped = false;
+      updateHud();
+    }
+
+    function launchActorOnPath(actor, index, path, startDir) {
+      const sideDir = new THREE.Vector3(-startDir.z, 0, startDir.x);
+      actor.laneIndex = index % state.laneCount;
+      const stagger = index * CONFIG.physics.carRadius * 2.8;
+      const laneOffset = getLaneOffset(actor.laneIndex);
+      const startPos = path[0].pos
+        .clone()
+        .add(startDir.clone().multiplyScalar(-stagger))
+        .add(sideDir.clone().multiplyScalar(laneOffset));
+      actor.lanePath = buildActorLanePath(actor.laneIndex);
+      actor.targetIndex = 1;
+      actor.speed = actor.params.startSpeed;
+      actor.pressure = 0;
+      actor.stopped = false;
+      actor.finished = false;
+      actor.lowSpeedTime = 0;
+      actor.mesh.rotation.set(0, 0, 0);
+      actor.body.position.set(startPos.x, startPos.y, startPos.z);
+      actor.body.velocity.set(startDir.x * actor.params.startSpeed, 0, startDir.z * actor.params.startSpeed);
+      actor.body.force.set(0, 0, 0);
+      placeCarAt(actor, { pos: startPos }, actor.lanePath[Math.min(1, actor.lanePath.length - 1)]);
+    }
+
+    function buildDrivePath() {
+      const route = buildDriveRoute();
+      if (route.length < 2) return [];
+      const path = buildSampledPath(route);
+      path.isLoop = Boolean(route.isLoop);
+      state.trackLoops = path.isLoop;
+      return path;
+    }
+
+    function buildDriveRoute() {
+      const start = [...state.pieces.values()].find((piece) => piece.type === 'start');
+      if (!start) return [];
+      const route = [];
+      let current = start;
+      let incoming = null;
+      const visited = new Set([cellKey(current.x, current.z)]);
+
+      for (let i = 0; i < 80; i += 1) {
+        const dir = getExitDirection(current, incoming);
+        if (dir === null) break;
+        route.push({ piece: current, incoming, exit: dir });
+        const stepCells = getPieceStepCells(current, dir);
+        const nextCell = {
+          x: current.x + DIRS[dir].x * stepCells,
+          z: current.z + DIRS[dir].y * stepCells,
+        };
+        const next = findPieceAtCell(nextCell.x, nextCell.z);
+        const nextIncoming = (dir + 2) % 4;
+        if (next && getExitDirection(next, nextIncoming) === null) break;
+        if (!next) break;
+        if (visited.has(cellKey(next.x, next.z))) {
+          if (next.type === 'start') {
+            const startExit = getExitDirection(next, nextIncoming);
+            if (startExit !== null) {
+              route.isLoop = true;
+            }
+          }
+          break;
+        }
+        visited.add(cellKey(next.x, next.z));
+        current = next;
+        incoming = nextIncoming;
+      }
+      return route;
+    }
+
+    function getExitDirection(piece, incoming) {
+      const forward = piece.rotation;
+      const back = (piece.rotation + 2) % 4;
+      if (piece.type === 'start') return forward;
+      if (piece.type === 'straight' || isLaneTransitionPiece(piece.type)) {
+        if (incoming === null) return forward;
+        if (incoming === back) return forward;
+        if (incoming === forward) return back;
+        return null;
+      }
+      const side = piece.type === 'curveL' ? (piece.rotation + 3) % 4 : (piece.rotation + 1) % 4;
+      if (incoming === back) return side;
+      if (incoming === side) return back;
+      return null;
+    }
+
+    function getPieceStepCells(piece, dir) {
+      return dir === piece.rotation ? getPieceCellLength(piece.type) : 1;
+    }
+
+    function buildSampledPath(route) {
+      const samples = [];
+      route.forEach((node, index) => {
+        const pieceSamples = samplePiecePath(node);
+        pieceSamples.forEach((sample) => {
+          const last = samples[samples.length - 1];
+          if (!last || last.pos.distanceTo(sample.pos) > 0.03) {
+            samples.push(sample);
+          }
+        });
+        if (index === route.length - 1) {
+          const exit = edgePoint(node.piece, node.exit);
+          samples.push({ pos: exit, piece: node.piece });
+        }
+      });
+      if (route.isLoop && samples.length > 2 && samples[0].pos.distanceTo(samples[samples.length - 1].pos) < 0.08) {
+        samples.pop();
+      }
+      assignPathNormals(samples, Boolean(route.isLoop));
+      return samples;
+    }
+
+    function assignPathNormals(samples, isLoop = false) {
+      samples.forEach((sample, index) => {
+        const prevIndex = isLoop ? (index - 1 + samples.length) % samples.length : Math.max(0, index - 1);
+        const nextIndex = isLoop ? (index + 1) % samples.length : Math.min(samples.length - 1, index + 1);
+        const prev = samples[prevIndex].pos;
+        const next = samples[nextIndex].pos;
+        const tangent = next.clone().sub(prev);
+        tangent.y = 0;
+        if (tangent.lengthSq() <= 0.0001) {
+          tangent.copy(new THREE.Vector3(0, 0, -1));
+        } else {
+          tangent.normalize();
+        }
+        sample.normal = new THREE.Vector3(-tangent.z, 0, tangent.x);
+      });
+    }
+
+    function buildActorLanePath(startLaneIndex) {
+      const nodes = [];
+      let lane = startLaneIndex;
+      const lapCount = state.trackLoops ? getLaneCycleLapCount(startLaneIndex) : 1;
+      for (let lap = 0; lap < lapCount; lap += 1) {
+        let index = 0;
+        while (index < state.carPath.length) {
+          const piece = state.carPath[index].piece;
+          let end = index + 1;
+          while (end < state.carPath.length && state.carPath[end].piece === piece) end += 1;
+          const laneStart = lane;
+          const laneEnd = getLaneEndForPiece(piece?.type, lane);
+          const span = Math.max(1, end - index - 1);
+          for (let i = index; i < end; i += 1) {
+            const t = (i - index) / span;
+            const laneFloat = getLaneFloatForPiece(piece?.type, laneStart, laneEnd, t);
+            const baseNode = state.carPath[i];
+            const pos = offsetPathNodeForLaneFloat(baseNode, laneFloat);
+            pos.y += getLaneVerticalOffset(piece?.type, laneStart, laneEnd, t);
+            nodes.push({
+              ...baseNode,
+              pos,
+              laneFloat,
+            });
+            if (nodes.length > 1 && nodes[nodes.length - 2].pos.distanceTo(nodes[nodes.length - 1].pos) < 0.02) {
+              nodes.pop();
+            }
+          }
+          lane = laneEnd;
+          index = end;
+        }
+      }
+      return nodes;
+    }
+
+    function getLaneCycleLapCount(startLaneIndex) {
+      let lane = startLaneIndex;
+      for (let lap = 1; lap <= 12; lap += 1) {
+        lane = getLapEndLane(lane);
+        if (lane === startLaneIndex) return lap;
+      }
+      return 12;
+    }
+
+    function getLapEndLane(startLaneIndex) {
+      let lane = startLaneIndex;
+      let index = 0;
+      while (index < state.carPath.length) {
+        const piece = state.carPath[index].piece;
+        let end = index + 1;
+        while (end < state.carPath.length && state.carPath[end].piece === piece) end += 1;
+        lane = getLaneEndForPiece(piece?.type, lane);
+        index = end;
+      }
+      return lane;
+    }
+
+    function getLaneEndForPiece(type, lane) {
+      if (state.laneCount < 2) return lane;
+      if (type === 'crossover') {
+        return (lane + state.laneCount - 1) % state.laneCount;
+      }
+      return lane;
+    }
+
+    function getLaneFloatForPiece(type, laneStart, laneEnd, t) {
+      const eased = t * t * (3 - 2 * t);
+      if (type === 'wave') {
+        return laneStart + Math.sin(Math.PI * 2 * t) * 0.18;
+      }
+      if (type === 'crossover' && laneStart === 0 && laneEnd === state.laneCount - 1) {
+        return THREE.MathUtils.lerp(laneStart, laneEnd, eased) + Math.sin(Math.PI * 2 * t) * -0.26;
+      }
+      if (type === 'crossover' && laneStart !== 0) {
+        const wave = Math.sin(Math.PI * 2 * t) * 0.18 * (laneStart % 2 === 0 ? -1 : 1);
+        return THREE.MathUtils.lerp(laneStart, laneEnd, eased) + wave;
+      }
+      return THREE.MathUtils.lerp(laneStart, laneEnd, eased);
+    }
+
+    function getLaneVerticalOffset(type, laneStart, laneEnd, t) {
+      if (type === 'crossover' && laneStart === 0 && laneEnd === state.laneCount - 1) {
+        return Math.sin(Math.PI * t) * 0.58;
+      }
+      return 0;
+    }
+
+    function samplePiecePath(node) {
+      if (node.piece.type === 'curveL' || node.piece.type === 'curveR') {
+        return sampleCurvePiece(node);
+      }
+      const start = node.incoming === null
+        ? edgePoint(node.piece, (node.exit + 2) % 4)
+        : edgePoint(node.piece, node.incoming);
+      const end = edgePoint(node.piece, node.exit);
+      if (isLaneTransitionPiece(node.piece.type)) {
+        const samples = [];
+        for (let i = 0; i <= 24; i += 1) {
+          samples.push({
+            pos: start.clone().lerp(end, i / 24),
+            piece: node.piece,
+          });
+        }
+        return samples;
+      }
+      return [
+        { pos: start, piece: node.piece },
+        { pos: end, piece: node.piece },
+      ];
+    }
+
+    function sampleCurvePiece(node) {
+      const entry = edgePoint(node.piece, node.incoming ?? (node.exit + 2) % 4);
+      const exit = edgePoint(node.piece, node.exit);
+      const center = curveCenter(node.piece);
+      const radius = CONFIG.tile * 0.5;
+      let startAngle = Math.atan2(entry.z - center.z, entry.x - center.x);
+      let endAngle = Math.atan2(exit.z - center.z, exit.x - center.x);
+      let deltaAngle = endAngle - startAngle;
+      while (deltaAngle > Math.PI) deltaAngle -= Math.PI * 2;
+      while (deltaAngle < -Math.PI) deltaAngle += Math.PI * 2;
+
+      const samples = [];
+      for (let i = 0; i <= CONFIG.physics.cornerSamples; i += 1) {
+        const t = i / CONFIG.physics.cornerSamples;
+        const angle = startAngle + deltaAngle * t;
+        samples.push({
+          pos: new THREE.Vector3(
+            center.x + Math.cos(angle) * radius,
+            driveHeight(node.piece),
+            center.z + Math.sin(angle) * radius
+          ),
+          piece: node.piece,
+        });
+      }
+      return samples;
+    }
+
+    function edgePoint(piece, dir) {
+      const center = pieceCenter(piece);
+      const forward = piece.rotation;
+      const back = (piece.rotation + 2) % 4;
+      let distance = 0.5;
+      if (dir === forward) distance = getPieceCellLength(piece.type) - 0.5;
+      if (dir === back) distance = 0.5;
+      return new THREE.Vector3(
+        center.x + DIRS[dir].x * CONFIG.tile * distance,
+        center.y,
+        center.z + DIRS[dir].y * CONFIG.tile * distance
+      );
+    }
+
+    function curveCenter(piece) {
+      const back = (piece.rotation + 2) % 4;
+      const side = piece.type === 'curveL' ? (piece.rotation + 3) % 4 : (piece.rotation + 1) % 4;
+      const center = pieceCenter(piece);
+      return new THREE.Vector3(
+        center.x + (DIRS[back].x + DIRS[side].x) * CONFIG.tile * 0.5,
+        center.y,
+        center.z + (DIRS[back].y + DIRS[side].y) * CONFIG.tile * 0.5
+      );
+    }
+
+    function updateCar(dt) {
+      if (state.mode !== 'drive' || state.carPath.length < 2) return;
+      carActors.forEach((actor) => {
+        applyDrivePhysics(actor, dt);
+      });
+      if (carActors.every((actor) => actor.stopped)) return;
+      physicsWorld.step(CONFIG.physics.fixedStep, dt, 3);
+      carActors.forEach((actor) => {
+        if (!actor.stopped) resolveRailCollision(actor);
+        syncCarFromPhysics(actor);
+      });
+      summarizeCars();
+      updateHud();
+    }
+
+    function placeCarAt(actor, a, b) {
+      actor.mesh.position.copy(a.pos);
+      actor.mesh.position.y += CONFIG.carVisualYOffset;
+      actor.mesh.lookAt(b.pos.x, actor.mesh.position.y, b.pos.z);
+    }
+
+    function applyDrivePhysics(actor, dt) {
+      if (actor.stopped) return;
+      const guide = getGuideTarget(actor);
+      if (!guide) {
+        actor.finished = true;
+        actor.stopped = true;
+        actor.speed = 0;
+        actor.body.velocity.set(0, 0, 0);
+        if (carActors.every((carActor) => carActor.stopped)) {
+          showToast('全部車抵達終點');
+          setTimeout(() => setMode('edit'), 800);
+        }
+        return;
+      }
+
+      const physics = CONFIG.physics;
+      const current = new THREE.Vector3(actor.body.position.x, actor.body.position.y, actor.body.position.z);
+      const desired = guide.target.clone().sub(current);
+      const dir = new THREE.Vector3(desired.x, 0, desired.z);
+      if (dir.lengthSq() > 0.0001) dir.normalize();
+
+      const speed = Math.hypot(actor.body.velocity.x, actor.body.velocity.z);
+      actor.speed = speed;
+      const targetSpeed = THREE.MathUtils.clamp(speed + actor.params.motorAccel * dt, actor.params.startSpeed, actor.params.maxSpeed);
+      const targetVelocity = dir.clone().multiplyScalar(targetSpeed);
+      const steerX = (targetVelocity.x - actor.body.velocity.x) * physics.guideStrength;
+      const steerZ = (targetVelocity.z - actor.body.velocity.z) * physics.guideStrength;
+      const centerCorrection = getCenteringCorrection(current, guide);
+      applyTireFriction(actor, dir, dt);
+      const sideDir = new THREE.Vector3(-dir.z, 0, dir.x);
+      const wander = Math.sin(performance.now() * 0.006 + actor.index * 2.1 + actor.targetIndex * 0.37)
+        * physics.tireWander
+        * Math.min(actor.speed / actor.params.maxSpeed, 1);
+      actor.body.force.set(
+        steerX + centerCorrection.x * physics.centeringStrength + sideDir.x * wander,
+        0,
+        steerZ + centerCorrection.z * physics.centeringStrength + sideDir.z * wander
+      );
+
+      state.lastSlope = guide.slope;
+      if (guide.slope > 0) {
+        actor.body.velocity.scale(Math.max(0.86, 1 - guide.slope * physics.uphillLoss * dt), actor.body.velocity);
+      }
+      if (guide.slope < 0) {
+        actor.body.velocity.x += dir.x * Math.abs(guide.slope) * physics.downhillBoost * dt;
+        actor.body.velocity.z += dir.z * Math.abs(guide.slope) * physics.downhillBoost * dt;
+      }
+
+      if (guide.piece?.type === 'curveL' || guide.piece?.type === 'curveR') {
+        const excess = Math.max(0, actor.speed - physics.curveSafeSpeed);
+        actor.pressure += excess * physics.curvePressure * dt;
+        if (excess > 0) actor.body.velocity.scale(Math.max(0.82, 1 - physics.curveRailLoss * dt), actor.body.velocity);
+      } else {
+        actor.pressure = Math.max(0, actor.pressure - physics.stabilityRecover * dt);
+      }
+
+      const currentSpeed = Math.hypot(actor.body.velocity.x, actor.body.velocity.z);
+      if (currentSpeed > actor.params.maxSpeed) {
+        actor.body.velocity.scale(actor.params.maxSpeed / currentSpeed, actor.body.velocity);
+      }
+      const boostedSpeed = Math.hypot(actor.body.velocity.x, actor.body.velocity.z);
+      if (boostedSpeed < physics.minMotorSpeed && dir.lengthSq() > 0.0001) {
+        actor.body.velocity.x += dir.x * (physics.minMotorSpeed - boostedSpeed) * 0.18;
+        actor.body.velocity.z += dir.z * (physics.minMotorSpeed - boostedSpeed) * 0.18;
+      }
+      actor.speed = Math.hypot(actor.body.velocity.x, actor.body.velocity.z);
+
+      if (guide.slope > 0.08 && actor.speed < physics.minClimbSpeed) {
+        failDrive(actor, `第 ${actor.index + 1} 台上坡速度不夠`);
+        return;
+      }
+
+      actor.lowSpeedTime = actor.speed <= physics.stallSpeed ? actor.lowSpeedTime + dt : 0;
+      if (actor.lowSpeedTime > 1.2) {
+        failDrive(actor, `第 ${actor.index + 1} 台速度太低`);
+        return;
+      }
+
+      if (actor.pressure >= physics.derailPressure) {
+        derailCar(actor, guide);
+      }
+    }
+
+    function applyTireFriction(actor, forwardDir, dt) {
+      const sideDir = new THREE.Vector3(-forwardDir.z, 0, forwardDir.x);
+      const lateralSpeed = actor.body.velocity.x * sideDir.x + actor.body.velocity.z * sideDir.z;
+      const damping = THREE.MathUtils.clamp(CONFIG.physics.lateralFriction * dt, 0, 0.5);
+      actor.body.velocity.x -= sideDir.x * lateralSpeed * damping;
+      actor.body.velocity.z -= sideDir.z * lateralSpeed * damping;
+    }
+
+    function getCenteringCorrection(current, guide) {
+      const nearest = closestPointOnSegment(current, guide.prev.pos, guide.node.pos);
+      const correction = nearest.clone().sub(current);
+      correction.y = 0;
+      const offset = correction.length();
+      if (offset > CONFIG.physics.maxCenterOffset) {
+        correction.setLength(CONFIG.physics.maxCenterOffset);
+      }
+      return correction;
+    }
+
+    function resolveRailCollision(actor) {
+      const current = new THREE.Vector3(actor.body.position.x, actor.body.position.y, actor.body.position.z);
+      const railHit = state.laneCount > 1
+        ? getNearestLaneBoundary(actor, current)
+        : getNearestTrackBoundary(current);
+      if (!railHit || railHit.offset <= railHit.limit) return;
+
+      const normal = current.clone().sub(railHit.nearest);
+      normal.y = 0;
+      if (normal.lengthSq() <= 0.0001) return;
+      normal.normalize();
+
+      const corrected = railHit.nearest.clone().add(normal.clone().multiplyScalar(railHit.limit));
+      actor.body.position.x = corrected.x;
+      actor.body.position.z = corrected.z;
+
+      const velocity = new THREE.Vector3(actor.body.velocity.x, 0, actor.body.velocity.z);
+      const normalSpeed = velocity.dot(normal);
+      const normalVelocity = normal.clone().multiplyScalar(normalSpeed);
+      const tangentVelocity = velocity.clone().sub(normalVelocity).multiplyScalar(CONFIG.physics.railFriction);
+      const bouncedNormal = normalSpeed > 0
+        ? normal.clone().multiplyScalar(-normalSpeed * CONFIG.physics.railRestitution)
+        : normalVelocity;
+      const resolved = tangentVelocity.add(bouncedNormal);
+      actor.body.velocity.x = resolved.x;
+      actor.body.velocity.z = resolved.z;
+      actor.pressure = Math.min(
+        CONFIG.physics.derailPressure * 0.96,
+        actor.pressure + 0.12 + Math.max(0, normalSpeed) * 0.04
+      );
+    }
+
+    function getNearestTrackBoundary(point) {
+      let best = null;
+      for (let i = 0; i < state.carPath.length - 1; i += 1) {
+        const a = state.carPath[i].pos;
+        const b = state.carPath[i + 1].pos;
+        const nearest = closestPointOnSegment(point, a, b);
+        const flatDelta = point.clone().sub(nearest);
+        flatDelta.y = 0;
+        const offset = flatDelta.length();
+        if (!best || offset < best.offset) {
+          best = {
+            nearest,
+            offset,
+            limit: getTrackWidth() * 0.5 - CONFIG.physics.carRadius,
+          };
+        }
+      }
+      if (state.trackLoops && state.carPath.length > 2) {
+        const a = state.carPath[state.carPath.length - 1].pos;
+        const b = state.carPath[0].pos;
+        const nearest = closestPointOnSegment(point, a, b);
+        const flatDelta = point.clone().sub(nearest);
+        flatDelta.y = 0;
+        const offset = flatDelta.length();
+        if (!best || offset < best.offset) {
+          best = {
+            nearest,
+            offset,
+            limit: getTrackWidth() * 0.5 - CONFIG.physics.carRadius,
+          };
+        }
+      }
+      return best;
+    }
+
+    function getNearestLaneBoundary(actor, point) {
+      let best = null;
+      const path = actor.lanePath.length > 1 ? actor.lanePath : state.carPath;
+      for (let i = 0; i < path.length - 1; i += 1) {
+        const a = path[i].pos;
+        const b = path[i + 1].pos;
+        const nearest = closestPointOnSegment(point, a, b);
+        const flatDelta = point.clone().sub(nearest);
+        flatDelta.y = 0;
+        const offset = flatDelta.length();
+        if (!best || offset < best.offset) {
+          best = {
+            nearest,
+            offset,
+            limit: getLaneWidth() * 0.5 - CONFIG.physics.carRadius + CONFIG.physics.laneClearance,
+          };
+        }
+      }
+      if (state.trackLoops && path.length > 2) {
+        const a = path[path.length - 1].pos;
+        const b = path[0].pos;
+        const nearest = closestPointOnSegment(point, a, b);
+        const flatDelta = point.clone().sub(nearest);
+        flatDelta.y = 0;
+        const offset = flatDelta.length();
+        if (!best || offset < best.offset) {
+          best = {
+            nearest,
+            offset,
+            limit: getLaneWidth() * 0.5 - CONFIG.physics.carRadius + CONFIG.physics.laneClearance,
+          };
+        }
+      }
+      return best;
+    }
+
+    function closestPointOnSegment(point, a, b) {
+      const ab = b.clone().sub(a);
+      const lengthSq = ab.lengthSq();
+      if (lengthSq <= 0.0001) return a.clone();
+      const t = THREE.MathUtils.clamp(point.clone().sub(a).dot(ab) / lengthSq, 0, 1);
+      return a.clone().add(ab.multiplyScalar(t));
+    }
+
+    function closestPointOnSegmentWithT(point, a, b) {
+      const ab = b.clone().sub(a);
+      const lengthSq = ab.lengthSq();
+      if (lengthSq <= 0.0001) return { point: a.clone(), t: 0 };
+      const t = THREE.MathUtils.clamp(point.clone().sub(a).dot(ab) / lengthSq, 0, 1);
+      return { point: a.clone().add(ab.multiplyScalar(t)), t };
+    }
+
+    function getGuideTarget(actor, advance = true) {
+      const current = new THREE.Vector3(actor.body.position.x, actor.body.position.y, actor.body.position.z);
+      const path = actor.lanePath.length > 1 ? actor.lanePath : state.carPath;
+      const isLoop = state.trackLoops && path.length > 2;
+      while (advance) {
+        const here = path[actor.targetIndex].pos;
+        if (current.distanceTo(here) > CONFIG.physics.lookAhead) break;
+        actor.targetIndex += 1;
+        if (isLoop) actor.targetIndex %= path.length;
+        if (!isLoop && actor.targetIndex >= path.length) return null;
+      }
+      if (!isLoop && actor.targetIndex >= path.length) return null;
+      const node = path[actor.targetIndex];
+      const prevIndex = isLoop
+        ? (actor.targetIndex - 1 + path.length) % path.length
+        : Math.max(0, actor.targetIndex - 1);
+      const prev = path[prevIndex];
+      const lanePrev = prev.pos;
+      const laneTarget = node.pos;
+      const span = Math.max(lanePrev.distanceTo(laneTarget), 0.001);
+      return {
+        target: laneTarget,
+        piece: node.piece,
+        slope: (laneTarget.y - lanePrev.y) / span,
+        prev: { ...prev, pos: lanePrev },
+        node: { ...node, pos: laneTarget },
+      };
+    }
+
+    function offsetPathNodeForLane(node, laneIndex) {
+      return offsetPathNodeForLaneFloat(node, laneIndex);
+    }
+
+    function offsetPathNodeForLaneFloat(node, laneFloat) {
+      const laneOffset = getLaneOffsetForFloat(laneFloat);
+      if (Math.abs(laneOffset) < 0.001 || !node.normal) return node.pos.clone();
+      return node.pos.clone().add(node.normal.clone().multiplyScalar(laneOffset));
+    }
+
+    function failDrive(actor, message) {
+      actor.stopped = true;
+      actor.speed = 0;
+      actor.body.velocity.set(0, 0, 0);
+      showToast(message);
+      if (carActors.every((carActor) => carActor.stopped)) {
+        setTimeout(() => setMode('edit'), 900);
+      }
+      updateHud();
+    }
+
+    function derailCar(actor, guide) {
+      const direction = new THREE.Vector3().subVectors(guide.node.pos, guide.prev.pos).normalize();
+      const side = new THREE.Vector3(-direction.z, 0, direction.x).multiplyScalar(0.85);
+      actor.mesh.position.add(side);
+      actor.mesh.rotation.z = 0.42;
+      failDrive(actor, `第 ${actor.index + 1} 台彎道太快`);
+    }
+
+    function syncCarFromPhysics(actor) {
+      const guide = getGuideTarget(actor, false);
+      let slopeTangent = null;
+      if (guide) {
+        const flatCurrent = new THREE.Vector3(actor.body.position.x, 0, actor.body.position.z);
+        const flatPrev = new THREE.Vector3(guide.prev.pos.x, 0, guide.prev.pos.z);
+        const flatNext = new THREE.Vector3(guide.node.pos.x, 0, guide.node.pos.z);
+        const projected = closestPointOnSegmentWithT(flatCurrent, flatPrev, flatNext);
+        const groundY = THREE.MathUtils.lerp(guide.prev.pos.y, guide.node.pos.y, projected.t);
+        actor.body.position.y = THREE.MathUtils.lerp(actor.body.position.y, groundY, 0.55);
+        slopeTangent = guide.node.pos.clone().sub(guide.prev.pos);
+      }
+      actor.mesh.position.set(actor.body.position.x, actor.body.position.y + CONFIG.carVisualYOffset, actor.body.position.z);
+      const velocity = new THREE.Vector3(actor.body.velocity.x, 0, actor.body.velocity.z);
+      if (slopeTangent && slopeTangent.lengthSq() > 0.0001) {
+        const direction = slopeTangent.normalize();
+        if (velocity.lengthSq() > 0.0001 && direction.x * velocity.x + direction.z * velocity.z < 0) {
+          direction.multiplyScalar(-1);
+        }
+        const look = actor.mesh.position.clone().add(direction);
+        actor.mesh.lookAt(look.x, look.y, look.z);
+      } else if (velocity.lengthSq() > 0.0001) {
+        const look = actor.mesh.position.clone().add(velocity);
+        actor.mesh.lookAt(look.x, actor.mesh.position.y, look.z);
+      }
+      actor.mesh.rotation.z += Math.sin(performance.now() * 0.05 + actor.index) * 0.004 * actor.pressure;
+    }
+
+    function summarizeCars() {
+      const activeCars = carActors.filter((actor) => !actor.finished);
+      const cars = activeCars.length > 0 ? activeCars : carActors;
+      state.carSpeed = cars.reduce((sum, actor) => sum + actor.speed, 0) / Math.max(cars.length, 1);
+      state.carPressure = cars.reduce((max, actor) => Math.max(max, actor.pressure), 0);
+      state.carStopped = carActors.every((actor) => actor.stopped);
+    }
+
+    function pieceCenter(piece) {
+      return new THREE.Vector3(piece.x * CONFIG.tile, driveHeight(piece), piece.z * CONFIG.tile);
+    }
+
+    function driveHeight(piece) {
+      if (!piece) return CONFIG.trackHeight + 0.03;
+      return CONFIG.trackHeight + 0.03;
+    }
+
+    function tintGroup(group, color, opacity) {
+      group.traverse((child) => {
+        if (child.material) {
+          child.material.color.setHex(color);
+          child.material.opacity = opacity;
+        }
+      });
+    }
+
+    function updateHud() {
+      modeText.textContent = state.mode === 'drive' ? '試跑' : state.erase ? '擦除' : '編輯';
+      pieceText.textContent = state.erase ? '擦除' : state.tool === 'select' ? '選擇' : PIECES[state.tool].label;
+      countText.textContent = `${state.pieces.size} 件`;
+      carCountText.textContent = `${state.carCount} 車`;
+      laneCountText.textContent = `${state.laneCount} lane`;
+      speedText.textContent = `${state.carSpeed.toFixed(1)} m/s`;
+      stabilityText.textContent = `穩定 ${Math.max(0, Math.round((1 - state.carPressure / CONFIG.physics.derailPressure) * 100))}%`;
+    }
+
+    function showToast(message) {
+      toast.textContent = message;
+      toast.classList.add('show');
+      clearTimeout(state.messageTimer);
+      state.messageTimer = setTimeout(() => toast.classList.remove('show'), 1600);
+    }
+
+    function cellKey(x, z) {
+      return `${x},${z}`;
+    }
+
+    function resize() {
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      if (canvas.width !== Math.floor(width * renderer.getPixelRatio()) || canvas.height !== Math.floor(height * renderer.getPixelRatio())) {
+        renderer.setSize(width, height, false);
+        composer.setSize(width, height);
+        camera.aspect = width / height;
+        camera.updateProjectionMatrix();
+      }
+    }
+
+    function updateSelectedOverlay() {
+      if (!pieceActions) return;
+      if (state.mode !== 'edit' || !state.selectedKey || !state.pieces.has(state.selectedKey)) {
+        pieceActions.classList.remove('show');
+        return;
+      }
+
+      const piece = state.pieces.get(state.selectedKey);
+      const anchor = getPieceActionAnchor(piece);
+      anchor.project(camera);
+      if (anchor.z < -1 || anchor.z > 1) {
+        pieceActions.classList.remove('show');
+        return;
+      }
+
+      const x = (anchor.x * 0.5 + 0.5) * window.innerWidth;
+      const y = (-anchor.y * 0.5 + 0.5) * window.innerHeight;
+      pieceActions.style.left = `${Math.round(x)}px`;
+      pieceActions.style.top = `${Math.round(y)}px`;
+      pieceActions.classList.add('show');
+    }
+
+    function getPieceActionAnchor(piece) {
+      const dir = DIRS[piece.rotation];
+      const side = new THREE.Vector2(-dir.y, dir.x);
+      const lengthCells = getPieceCellLength(piece.type);
+      const centerX = (piece.x + dir.x * (lengthCells - 1) * 0.5) * CONFIG.tile;
+      const centerZ = (piece.z + dir.y * (lengthCells - 1) * 0.5) * CONFIG.tile;
+      const halfLength = CONFIG.tile * lengthCells * 0.5;
+      const halfWidth = getTrackWidth() * 0.5;
+      return new THREE.Vector3(
+        centerX + dir.x * halfLength * 0.86 + side.x * halfWidth * 0.86,
+        0.86,
+        centerZ + dir.y * halfLength * 0.86 + side.y * halfWidth * 0.86
+      );
+    }
