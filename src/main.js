@@ -426,6 +426,14 @@
         laneIndex: index % state.laneCount,
         lanePath: [],
         lowSpeedTime: 0,
+        derailed: false,
+        derailState: 'none',
+        flightVelocity: new THREE.Vector3(),
+        spinVelocity: new THREE.Vector3(),
+        derailHitCount: 0,
+        derailHitCooldown: 0,
+        flipTimer: 0,
+        flipYaw: 0,
         params,
       };
     }
@@ -1202,7 +1210,16 @@
       actor.stopped = false;
       actor.finished = false;
       actor.lowSpeedTime = 0;
+      actor.derailed = false;
+      actor.derailState = 'none';
+      actor.flightVelocity.set(0, 0, 0);
+      actor.spinVelocity.set(0, 0, 0);
+      actor.derailHitCount = 0;
+      actor.derailHitCooldown = 0;
+      actor.flipTimer = 0;
+      actor.flipYaw = 0;
       actor.mesh.rotation.set(0, 0, 0);
+      actor.mesh.visible = true;
       actor.body.position.set(startPos.x, startPos.y, startPos.z);
       actor.body.velocity.set(startDir.x * actor.params.startSpeed, 0, startDir.z * actor.params.startSpeed);
       actor.body.force.set(0, 0, 0);
@@ -1388,7 +1405,8 @@
         return THREE.MathUtils.lerp(laneStart, laneEnd, eased) + Math.sin(Math.PI * 2 * t) * -0.26;
       }
       if (type === 'crossover' && laneStart !== 0) {
-        const wave = Math.sin(Math.PI * 2 * t) * 0.18 * (laneStart % 2 === 0 ? -1 : 1);
+        const waveAmount = laneStart === 2 ? 0.22 : 0.24;
+        const wave = Math.sin(Math.PI * 2 * t) * waveAmount;
         return THREE.MathUtils.lerp(laneStart, laneEnd, eased) + wave;
       }
       return THREE.MathUtils.lerp(laneStart, laneEnd, eased);
@@ -1480,13 +1498,20 @@
     function updateCar(dt) {
       if (state.mode !== 'drive' || state.carPath.length < 2) return;
       carActors.forEach((actor) => {
-        applyDrivePhysics(actor, dt);
+        actor.derailed ? updateDerailedCar(actor, dt) : applyDrivePhysics(actor, dt);
       });
-      if (carActors.every((actor) => actor.stopped)) return;
+      if (carActors.every((actor) => actor.stopped)) {
+        summarizeCars();
+        updateHud();
+        return;
+      }
       physicsWorld.step(CONFIG.physics.fixedStep, dt, 3);
       carActors.forEach((actor) => {
-        if (!actor.stopped) resolveRailCollision(actor);
-        syncCarFromPhysics(actor);
+        if (!actor.stopped && !actor.derailed) {
+          resolveRailCollision(actor);
+          resolveActiveCarObstacleCollision(actor);
+        }
+        if (!actor.derailed) syncCarFromPhysics(actor);
       });
       summarizeCars();
       updateHud();
@@ -1548,8 +1573,11 @@
 
       if (guide.piece?.type === 'curveL' || guide.piece?.type === 'curveR') {
         const excess = Math.max(0, actor.speed - physics.curveSafeSpeed);
-        actor.pressure += excess * physics.curvePressure * dt;
+        actor.pressure += excess * excess * physics.curvePressure * dt * 0.28;
         if (excess > 0) actor.body.velocity.scale(Math.max(0.82, 1 - physics.curveRailLoss * dt), actor.body.velocity);
+      } else if (guide.piece?.type === 'crossover' || guide.piece?.type === 'wave') {
+        const excess = Math.max(0, actor.speed - physics.curveSafeSpeed * 1.12);
+        actor.pressure += excess * excess * physics.curvePressure * dt * 0.18;
       } else {
         actor.pressure = Math.max(0, actor.pressure - physics.stabilityRecover * dt);
       }
@@ -1630,6 +1658,40 @@
         CONFIG.physics.derailPressure * 0.96,
         actor.pressure + 0.12 + Math.max(0, normalSpeed) * 0.04
       );
+    }
+
+    function resolveActiveCarObstacleCollision(actor) {
+      const current = new THREE.Vector3(actor.body.position.x, 0, actor.body.position.z);
+      carActors.forEach((other) => {
+        if (other === actor || !other.mesh.visible || !other.derailed) return;
+        const obstacle = new THREE.Vector3(other.mesh.position.x, 0, other.mesh.position.z);
+        const delta = current.clone().sub(obstacle);
+        const distance = delta.length();
+        const minDistance = CONFIG.physics.derailCollisionRadius + CONFIG.physics.carRadius;
+        if (distance <= 0.0001 || distance >= minDistance) return;
+
+        const normal = delta.multiplyScalar(1 / distance);
+        const push = minDistance - distance + 0.004;
+        actor.body.position.x += normal.x * push;
+        actor.body.position.z += normal.z * push;
+
+        const velocity = new THREE.Vector3(actor.body.velocity.x, 0, actor.body.velocity.z);
+        const obstacleVelocity = new THREE.Vector3(other.flightVelocity.x, 0, other.flightVelocity.z);
+        const relativeSpeed = velocity.clone().sub(obstacleVelocity).dot(normal);
+        if (relativeSpeed >= 0) return;
+
+        const tangentVelocity = velocity.clone().sub(normal.clone().multiplyScalar(relativeSpeed)).multiplyScalar(0.35);
+        const bounced = normal.clone().multiplyScalar(-relativeSpeed * CONFIG.physics.derailCarBounce);
+        actor.body.velocity.x = tangentVelocity.x + bounced.x;
+        actor.body.velocity.z = tangentVelocity.z + bounced.z;
+        actor.pressure = Math.min(CONFIG.physics.derailPressure * 0.98, actor.pressure + Math.abs(relativeSpeed) * 0.16);
+
+        if (!other.stopped) {
+          const shove = -relativeSpeed * 0.45;
+          other.flightVelocity.x -= normal.x * shove;
+          other.flightVelocity.z -= normal.z * shove;
+        }
+      });
     }
 
     function getNearestTrackBoundary(point) {
@@ -1770,11 +1832,419 @@
     }
 
     function derailCar(actor, guide) {
-      const direction = new THREE.Vector3().subVectors(guide.node.pos, guide.prev.pos).normalize();
-      const side = new THREE.Vector3(-direction.z, 0, direction.x).multiplyScalar(0.85);
-      actor.mesh.position.add(side);
-      actor.mesh.rotation.z = 0.42;
-      failDrive(actor, `第 ${actor.index + 1} 台彎道太快`);
+      const tangent = new THREE.Vector3().subVectors(guide.node.pos, guide.prev.pos);
+      tangent.y = 0;
+      if (tangent.lengthSq() <= 0.0001) tangent.set(0, 0, -1);
+      tangent.normalize();
+
+      const velocity = new THREE.Vector3(actor.body.velocity.x, 0, actor.body.velocity.z);
+      const sideSign = velocity.dot(new THREE.Vector3(-tangent.z, 0, tangent.x)) >= 0 ? 1 : -1;
+      const side = new THREE.Vector3(-tangent.z, 0, tangent.x).multiplyScalar(sideSign);
+      const forwardSpeed = Math.max(velocity.length(), actor.speed, 2.2);
+
+      actor.derailed = true;
+      actor.derailState = 'flying';
+      actor.stopped = false;
+      actor.finished = true;
+      actor.pressure = CONFIG.physics.derailPressure;
+      actor.derailHitCount = 0;
+      actor.derailHitCooldown = 0;
+      actor.flipTimer = 0;
+      actor.flightVelocity.copy(tangent.multiplyScalar(forwardSpeed * 0.72));
+      actor.flightVelocity.add(side.multiplyScalar(forwardSpeed * 0.46));
+      actor.flightVelocity.y = Math.min(4.8, 1.6 + forwardSpeed * 0.16);
+      actor.spinVelocity.set(
+        4.2 + Math.random() * 3.2,
+        (Math.random() - 0.5) * 2.4,
+        sideSign * (5.8 + Math.random() * 3.6)
+      );
+      actor.body.velocity.set(0, 0, 0);
+      actor.body.force.set(0, 0, 0);
+      showToast(`第 ${actor.index + 1} 台飛出軌`);
+    }
+
+    function updateDerailedCar(actor, dt) {
+      if (actor.stopped) return;
+      actor.derailHitCooldown = Math.max(0, actor.derailHitCooldown - dt);
+      if (actor.derailState === 'flipping') {
+        updateForcedFlipCar(actor, dt);
+        return;
+      }
+      if (actor.derailState === 'offtrack') {
+        updateOffTrackCar(actor, dt);
+        return;
+      }
+      if (actor.derailState === 'wrecked') {
+        updateWreckedCar(actor, dt);
+        return;
+      }
+
+      actor.flightVelocity.y -= CONFIG.physics.flightGravity * dt;
+      actor.flightVelocity.multiplyScalar(Math.max(CONFIG.physics.flightAirDamping - dt * 0.08, 0.9));
+      actor.mesh.position.add(actor.flightVelocity.clone().multiplyScalar(dt));
+      resolveDerailedRailCollision(actor);
+      resolveDerailedCarCollisions(actor);
+      actor.mesh.rotation.x += actor.spinVelocity.x * dt;
+      actor.mesh.rotation.y += actor.spinVelocity.y * dt;
+      actor.mesh.rotation.z += actor.spinVelocity.z * dt;
+      actor.speed = actor.flightVelocity.length();
+
+      const groundY = getDerailedGroundY(actor.mesh.position, actor);
+      if (actor.mesh.position.y <= groundY) {
+        actor.mesh.position.y = groundY;
+        resolveDerailLanding(actor);
+      }
+    }
+
+    function resolveDerailLanding(actor) {
+      const upright = getCarUpDot(actor) > CONFIG.physics.flightUprightThreshold;
+      const landing = getLandingOnLane(actor);
+
+      if (upright && landing) {
+        rejoinTrack(actor, landing);
+        showToast(`第 ${actor.index + 1} 台落回軌道`);
+        return;
+      }
+
+      actor.flightVelocity.y = 0;
+      actor.spinVelocity.multiplyScalar(0.32);
+      if (!upright) {
+        actor.derailState = 'wrecked';
+        actor.flightVelocity.multiplyScalar(CONFIG.physics.flightGroundDamping);
+        actor.spinVelocity.set(0, 0, 0);
+        settleCarRotation(actor, true);
+        showToast(`第 ${actor.index + 1} 台反車`);
+        return;
+      }
+
+      actor.derailState = 'offtrack';
+      actor.derailHitCount = 0;
+      actor.derailHitCooldown = CONFIG.physics.offTrackHitCooldown;
+      settleCarRotation(actor, false);
+      alignCarToVelocity(actor);
+      showToast(`第 ${actor.index + 1} 台衝出場外`);
+    }
+
+    function recordOffTrackHit(actor) {
+      if (actor.derailState !== 'offtrack' || actor.derailHitCooldown > 0) return;
+      actor.derailHitCount += 1;
+      actor.derailHitCooldown = CONFIG.physics.offTrackHitCooldown;
+      if (actor.derailHitCount >= CONFIG.physics.offTrackFlipHits) {
+        startForcedFlip(actor);
+      }
+    }
+
+    function startForcedFlip(actor) {
+      actor.derailState = 'flipping';
+      actor.flipTimer = 0;
+      actor.flipYaw = actor.mesh.rotation.y;
+      actor.spinVelocity.set(0, 0, 0);
+      actor.flightVelocity.multiplyScalar(0.78);
+      showToast(`第 ${actor.index + 1} 台撞到翻車`);
+    }
+
+    function updateForcedFlipCar(actor, dt) {
+      actor.flightVelocity.y = 0;
+      actor.flightVelocity.multiplyScalar(Math.pow(CONFIG.physics.wreckFriction, dt * 60));
+      actor.mesh.position.add(actor.flightVelocity.clone().multiplyScalar(dt));
+      actor.mesh.position.y = getDerailedGroundY(actor.mesh.position, actor);
+      resolveDerailedRailCollision(actor);
+      resolveDerailedCarCollisions(actor);
+
+      actor.flipTimer += dt;
+      const t = THREE.MathUtils.clamp(actor.flipTimer / CONFIG.physics.forcedFlipDuration, 0, 1);
+      const eased = 1 - Math.pow(1 - t, 3);
+      actor.mesh.rotation.set(
+        Math.PI * eased,
+        actor.flipYaw,
+        Math.sin(eased * Math.PI * 2) * 0.22
+      );
+      actor.speed = actor.flightVelocity.length();
+
+      if (t >= 1) {
+        actor.derailState = 'wrecked';
+        actor.spinVelocity.set(0, 0, 0);
+        settleCarRotation(actor, true);
+      }
+    }
+
+    function getDerailedGroundY(point = null, actor = null) {
+      const clearance = actor?.derailState === 'wrecked' || actor?.derailState === 'flipping'
+        ? CONFIG.physics.invertedGroundClearance
+        : CONFIG.physics.flightGroundClearance;
+      const base = driveHeight(null) + CONFIG.carVisualYOffset + clearance;
+      const surfaceHeight = point ? getNearestTrackSurfaceHeight(point) : null;
+      return surfaceHeight === null
+        ? base
+        : Math.max(base, surfaceHeight + CONFIG.carVisualYOffset + clearance);
+    }
+
+    function getNearestTrackSurfaceHeight(point) {
+      let best = null;
+      const considerPath = (path, limit) => {
+        if (!path || path.length < 2) return;
+        for (let i = 0; i < path.length - 1; i += 1) {
+          const hit = closestPointOnSegmentWithT(point, path[i].pos, path[i + 1].pos);
+          const flatDelta = point.clone().sub(hit.point);
+          flatDelta.y = 0;
+          const offset = flatDelta.length();
+          if (offset <= limit && (!best || offset < best.offset || hit.point.y > best.height)) {
+            best = { offset, height: hit.point.y };
+          }
+        }
+        if (state.trackLoops && path.length > 2) {
+          const hit = closestPointOnSegmentWithT(point, path[path.length - 1].pos, path[0].pos);
+          const flatDelta = point.clone().sub(hit.point);
+          flatDelta.y = 0;
+          const offset = flatDelta.length();
+          if (offset <= limit && (!best || offset < best.offset || hit.point.y > best.height)) {
+            best = { offset, height: hit.point.y };
+          }
+        }
+      };
+
+      considerPath(state.carPath, getTrackWidth() * 0.5 + CONFIG.physics.derailCollisionRadius);
+      carActors.forEach((carActor) => {
+        considerPath(carActor.lanePath, getLaneWidth() * 0.5 + CONFIG.physics.derailCollisionRadius);
+      });
+      return best ? best.height : null;
+    }
+
+    function settleCarRotation(actor, inverted) {
+      const velocity = new THREE.Vector3(actor.flightVelocity.x, 0, actor.flightVelocity.z);
+      let yaw = actor.mesh.rotation.y;
+      if (velocity.lengthSq() > 0.0001) yaw = Math.atan2(velocity.x, velocity.z);
+      actor.mesh.rotation.set(inverted ? Math.PI : 0, yaw, 0);
+    }
+
+    function resolveDerailedRailCollision(actor) {
+      const railTop = CONFIG.trackHeight * 0.5 + CONFIG.railBaseOffset + CONFIG.railHeight * 0.5;
+      if (actor.mesh.position.y - CONFIG.physics.derailCollisionRadius > railTop) return;
+
+      const hit = getNearestPhysicalRail(actor.mesh.position);
+      if (!hit || hit.offset >= CONFIG.physics.derailCollisionRadius) return;
+
+      const normal = actor.mesh.position.clone().sub(hit.nearest);
+      normal.y = 0;
+      if (normal.lengthSq() <= 0.0001) {
+        normal.copy(hit.normal);
+      } else {
+        normal.normalize();
+      }
+      const push = CONFIG.physics.derailCollisionRadius - hit.offset + 0.004;
+      actor.mesh.position.add(normal.clone().multiplyScalar(push));
+
+      const velocity = new THREE.Vector3(actor.flightVelocity.x, 0, actor.flightVelocity.z);
+      const normalSpeed = velocity.dot(normal);
+      if (normalSpeed >= 0) return;
+      const tangentVelocity = velocity.clone().sub(normal.clone().multiplyScalar(normalSpeed)).multiplyScalar(CONFIG.physics.railFriction);
+      const bounced = normal.clone().multiplyScalar(-normalSpeed * CONFIG.physics.derailRailBounce);
+      actor.flightVelocity.x = tangentVelocity.x + bounced.x;
+      actor.flightVelocity.z = tangentVelocity.z + bounced.z;
+      actor.spinVelocity.multiplyScalar(0.72);
+      recordOffTrackHit(actor);
+    }
+
+    function getNearestPhysicalRail(point) {
+      if (state.carPath.length < 2) return null;
+      const offsets = [];
+      const halfWidth = getTrackWidth() * 0.5;
+      for (let i = 0; i <= state.laneCount; i += 1) {
+        offsets.push(-halfWidth + i * getLaneWidth());
+      }
+      let best = null;
+      const visitSegment = (aNode, bNode, offset) => {
+        if (!aNode.normal || !bNode.normal) return;
+        const a = aNode.pos.clone().add(aNode.normal.clone().multiplyScalar(offset));
+        const b = bNode.pos.clone().add(bNode.normal.clone().multiplyScalar(offset));
+        const nearest = closestPointOnSegment(point, a, b);
+        const delta = point.clone().sub(nearest);
+        delta.y = 0;
+        const offsetDistance = delta.length();
+        if (!best || offsetDistance < best.offset) {
+          const tangent = b.clone().sub(a);
+          tangent.y = 0;
+          const normal = tangent.lengthSq() > 0.0001
+            ? new THREE.Vector3(-tangent.z, 0, tangent.x).normalize()
+            : new THREE.Vector3(1, 0, 0);
+          best = { nearest, offset: offsetDistance, normal };
+        }
+      };
+
+      for (let i = 0; i < state.carPath.length - 1; i += 1) {
+        offsets.forEach((offset) => visitSegment(state.carPath[i], state.carPath[i + 1], offset));
+      }
+      if (state.trackLoops && state.carPath.length > 2) {
+        const last = state.carPath[state.carPath.length - 1];
+        offsets.forEach((offset) => visitSegment(last, state.carPath[0], offset));
+      }
+      return best;
+    }
+
+    function resolveDerailedCarCollisions(actor) {
+      carActors.forEach((other) => {
+        if (other === actor || !other.mesh.visible) return;
+        const otherIsObstacle = other.derailed || other.stopped;
+        if (!otherIsObstacle) return;
+        const delta = actor.mesh.position.clone().sub(other.mesh.position);
+        delta.y = 0;
+        const distance = delta.length();
+        const minDistance = CONFIG.physics.derailCollisionRadius * 2;
+        if (distance <= 0.0001 || distance >= minDistance) return;
+
+        const normal = delta.multiplyScalar(1 / distance);
+        const push = (minDistance - distance) * 0.5 + 0.002;
+        actor.mesh.position.add(normal.clone().multiplyScalar(push));
+        if (other.derailed && !other.stopped) {
+          other.mesh.position.add(normal.clone().multiplyScalar(-push));
+        }
+
+        const actorVel = new THREE.Vector3(actor.flightVelocity.x, 0, actor.flightVelocity.z);
+        const otherVel = other.derailed
+          ? new THREE.Vector3(other.flightVelocity.x, 0, other.flightVelocity.z)
+          : new THREE.Vector3(0, 0, 0);
+        const relativeSpeed = actorVel.clone().sub(otherVel).dot(normal);
+        if (relativeSpeed >= 0) return;
+
+        const impulse = -relativeSpeed * CONFIG.physics.derailCarBounce;
+        actor.flightVelocity.x -= normal.x * impulse;
+        actor.flightVelocity.z -= normal.z * impulse;
+        if (other.derailed && !other.stopped) {
+          other.flightVelocity.x -= normal.x * impulse * 0.65;
+          other.flightVelocity.z -= normal.z * impulse * 0.65;
+          if (other.derailState !== 'wrecked') {
+            other.spinVelocity.add(new THREE.Vector3(normal.z, 0, -normal.x).multiplyScalar(impulse * 0.5));
+          }
+        }
+        if (actor.derailState !== 'wrecked') {
+          actor.spinVelocity.add(new THREE.Vector3(-normal.z, 0, normal.x).multiplyScalar(impulse * 0.55));
+        }
+        recordOffTrackHit(actor);
+        recordOffTrackHit(other);
+      });
+    }
+
+    function getCarUpDot(actor) {
+      const up = new THREE.Vector3(0, 1, 0).applyQuaternion(actor.mesh.quaternion);
+      return up.dot(new THREE.Vector3(0, 1, 0));
+    }
+
+    function getLandingOnLane(actor) {
+      if (!actor.lanePath || actor.lanePath.length < 2) return null;
+      const point = actor.mesh.position.clone();
+      let best = null;
+      for (let i = 0; i < actor.lanePath.length - 1; i += 1) {
+        const a = actor.lanePath[i].pos;
+        const b = actor.lanePath[i + 1].pos;
+        const hit = closestPointOnSegmentWithT(point, a, b);
+        const flatDelta = point.clone().sub(hit.point);
+        flatDelta.y = 0;
+        const offset = flatDelta.length();
+        if (!best || offset < best.offset) {
+          best = {
+            offset,
+            point: hit.point,
+            nextIndex: i + 1,
+            tangent: b.clone().sub(a),
+          };
+        }
+      }
+      if (state.trackLoops && actor.lanePath.length > 2) {
+        const lastIndex = actor.lanePath.length - 1;
+        const a = actor.lanePath[lastIndex].pos;
+        const b = actor.lanePath[0].pos;
+        const hit = closestPointOnSegmentWithT(point, a, b);
+        const flatDelta = point.clone().sub(hit.point);
+        flatDelta.y = 0;
+        const offset = flatDelta.length();
+        if (!best || offset < best.offset) {
+          best = {
+            offset,
+            point: hit.point,
+            nextIndex: 0,
+            tangent: b.clone().sub(a),
+          };
+        }
+      }
+      const limit = getLaneWidth() * 0.5 - CONFIG.physics.carRadius + CONFIG.physics.laneClearance;
+      return best && best.offset <= limit ? best : null;
+    }
+
+    function rejoinTrack(actor, landing) {
+      const tangent = landing.tangent.clone();
+      tangent.y = 0;
+      if (tangent.lengthSq() <= 0.0001) tangent.set(0, 0, -1);
+      tangent.normalize();
+      const flatVelocity = new THREE.Vector3(actor.flightVelocity.x, 0, actor.flightVelocity.z);
+      if (flatVelocity.lengthSq() > 0.0001 && flatVelocity.dot(tangent) < 0) tangent.multiplyScalar(-1);
+      const speed = Math.max(flatVelocity.length() * 0.68, CONFIG.physics.flightRejoinSpeed);
+
+      actor.derailed = false;
+      actor.derailState = 'none';
+      actor.finished = false;
+      actor.stopped = false;
+      actor.pressure = CONFIG.physics.derailPressure * 0.38;
+      actor.lowSpeedTime = 0;
+      actor.targetIndex = landing.nextIndex;
+      actor.flightVelocity.set(0, 0, 0);
+      actor.spinVelocity.set(0, 0, 0);
+      actor.body.position.set(landing.point.x, landing.point.y, landing.point.z);
+      actor.body.velocity.set(tangent.x * speed, 0, tangent.z * speed);
+      actor.body.force.set(0, 0, 0);
+      actor.mesh.rotation.set(0, 0, 0);
+      syncCarFromPhysics(actor);
+    }
+
+    function updateOffTrackCar(actor, dt) {
+      actor.flightVelocity.y = 0;
+      const groundSpeed = Math.hypot(actor.flightVelocity.x, actor.flightVelocity.z);
+      if (groundSpeed < CONFIG.physics.offTrackCruiseSpeed) {
+        const heading = new THREE.Vector3(actor.flightVelocity.x, 0, actor.flightVelocity.z);
+        if (heading.lengthSq() <= 0.0001) heading.set(0, 0, -1);
+        heading.normalize().multiplyScalar(CONFIG.physics.offTrackCruiseSpeed);
+        actor.flightVelocity.x = heading.x;
+        actor.flightVelocity.z = heading.z;
+      }
+      actor.mesh.position.add(actor.flightVelocity.clone().multiplyScalar(dt));
+      actor.mesh.position.y = getDerailedGroundY(actor.mesh.position, actor);
+      resolveDerailedRailCollision(actor);
+      resolveDerailedCarCollisions(actor);
+      if (actor.derailState === 'flipping') return;
+      actor.speed = actor.flightVelocity.length();
+      alignCarToVelocity(actor);
+      const limit = CONFIG.gridSize * CONFIG.tile * 0.5 + CONFIG.physics.offTrackDespawnDistance;
+      if (Math.abs(actor.mesh.position.x) > limit || Math.abs(actor.mesh.position.z) > limit) {
+        actor.mesh.visible = false;
+        actor.stopped = true;
+        actor.speed = 0;
+        actor.flightVelocity.set(0, 0, 0);
+        actor.derailState = 'gone';
+      }
+    }
+
+    function updateWreckedCar(actor, dt) {
+      actor.flightVelocity.y = 0;
+      actor.flightVelocity.multiplyScalar(Math.pow(CONFIG.physics.wreckFriction, dt * 60));
+      actor.mesh.position.add(actor.flightVelocity.clone().multiplyScalar(dt));
+      actor.mesh.position.y = getDerailedGroundY(actor.mesh.position, actor);
+      resolveDerailedRailCollision(actor);
+      resolveDerailedCarCollisions(actor);
+      settleCarRotation(actor, true);
+      actor.speed = actor.flightVelocity.length();
+      if (actor.speed < CONFIG.physics.wreckStopSpeed) {
+        actor.stopped = true;
+        actor.speed = 0;
+        actor.flightVelocity.set(0, 0, 0);
+        actor.spinVelocity.set(0, 0, 0);
+        actor.derailState = 'settled';
+      }
+    }
+
+    function alignCarToVelocity(actor) {
+      const velocity = new THREE.Vector3(actor.flightVelocity.x, 0, actor.flightVelocity.z);
+      if (velocity.lengthSq() <= 0.0001) return;
+      const look = actor.mesh.position.clone().add(velocity);
+      actor.mesh.lookAt(look.x, actor.mesh.position.y, look.z);
     }
 
     function syncCarFromPhysics(actor) {
@@ -1806,7 +2276,7 @@
     }
 
     function summarizeCars() {
-      const activeCars = carActors.filter((actor) => !actor.finished);
+      const activeCars = carActors.filter((actor) => !actor.finished || actor.derailed);
       const cars = activeCars.length > 0 ? activeCars : carActors;
       state.carSpeed = cars.reduce((sum, actor) => sum + actor.speed, 0) / Math.max(cars.length, 1);
       state.carPressure = cars.reduce((max, actor) => Math.max(max, actor.pressure), 0);

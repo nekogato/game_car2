@@ -128,8 +128,18 @@
     }
 
     .tool-icon {
+      display: inline-grid;
+      place-items: center;
       font-size: 16px;
       font-weight: 800;
+    }
+
+    .toolbar .tool-icon img {
+      width: 32px;
+      height: 32px;
+      display: block;
+      object-fit: contain;
+      image-rendering: pixelated;
     }
 
     .actions {
@@ -310,15 +320,15 @@
       </div>
     </section>
     <nav class="panel toolbar" aria-label="賽道零件">
-      <button data-tool="select" title="選擇"><span class="tool-icon">□</span></button>
-      <button class="active" data-tool="straight" title="直線"><span class="tool-icon">━</span></button>
-      <button data-tool="curveL" title="左彎"><span class="tool-icon">╭</span></button>
-      <button data-tool="curveR" title="右彎"><span class="tool-icon">╮</span></button>
-      <button data-tool="crossover" title="交叉轉線"><span class="tool-icon">↭</span></button>
-      <button data-tool="wave" title="波浪道"><span class="tool-icon">∿</span></button>
-      <button data-tool="start" title="起點"><span class="tool-icon">◆</span></button>
-      <button id="rotateBtn" title="旋轉"><span class="tool-icon">↻</span></button>
-      <button id="eraseBtn" title="擦除"><span class="tool-icon">⌫</span></button>
+      <button data-tool="select" title="選擇"><span class="tool-icon"><img src="./images/select.png" alt=""></span></button>
+      <button class="active" data-tool="straight" title="直線"><span class="tool-icon"><img src="./images/straight.png" alt=""></span></button>
+      <button data-tool="curveL" title="左彎"><span class="tool-icon"><img src="./images/curveL.png" alt=""></span></button>
+      <button data-tool="curveR" title="右彎"><span class="tool-icon"><img src="./images/curveR.png" alt=""></span></button>
+      <button data-tool="crossover" title="交叉轉線"><span class="tool-icon"><img src="./images/crossover.png" alt=""></span></button>
+      <button data-tool="wave" title="波浪道"><span class="tool-icon"><img src="./images/wave.png" alt=""></span></button>
+      <button data-tool="start" title="起點"><span class="tool-icon"><img src="./images/start.png" alt=""></span></button>
+      <button id="rotateBtn" title="旋轉"><span class="tool-icon"><img src="./images/rotateBtn.png" alt=""></span></button>
+      <button id="eraseBtn" title="擦除"><span class="tool-icon"><img src="./images/eraseBtn.png" alt=""></span></button>
     </nav>
     <div class="panel actions">
       <button id="lessCarsBtn" title="減少車"><span class="tool-icon">−</span></button>
@@ -340,9 +350,9 @@
     </div>
     <div class="window-body">
       <label>車殼色 <input id="carColorInput" type="color" value="#e43d30"></label>
-      <label>起步速度 <input id="carStartSpeedInput" type="range" min="2.0" max="6.0" step="0.1" value="3.8"></label>
-      <label>馬達 <input id="carMotorInput" type="range" min="2.0" max="7.0" step="0.1" value="4.1"></label>
-      <label>極速 <input id="carMaxSpeedInput" type="range" min="7.0" max="15.0" step="0.1" value="12.2"></label>
+      <label>起步速度 <input id="carStartSpeedInput" type="range" min="2.0" max="10.0" step="0.1" value="3.8"></label>
+      <label>馬達 <input id="carMotorInput" type="range" min="2.0" max="24.0" step="0.1" value="4.1"></label>
+      <label>極速 <input id="carMaxSpeedInput" type="range" min="7.0" max="28.0" step="0.1" value="12.2"></label>
       <button id="launchCarBtn" class="primary">出發</button>
     </div>
   </section>

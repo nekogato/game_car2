@@ -1,7 +1,7 @@
 # State
 
-Last action: Added a draggable car setup popup opened by the add-car button, allowing color/start speed/motor/max speed configuration before launch; new configured cars can join an active run. Also changed chassis, tires, stays, and guide rollers to black.
+Last action: Changed upright off-track cars to preserve their landing horizontal speed instead of damping down after leaving the track.
 
 Current milestone: First playable prototype.
 
-Next step: Playtest Select mode in a browser at `http://localhost:8080`, especially selecting/rotating/deleting 1x2 crossover pieces.
+Next step: Playtest upright off-track cars in a browser at `http://localhost:8080`, especially checking that their post-landing speed matches the speed before leaving the track.
