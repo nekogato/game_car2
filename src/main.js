@@ -497,6 +497,8 @@
         derailState: 'none',
         flightVelocity: new THREE.Vector3(),
         spinVelocity: new THREE.Vector3(),
+        flightTime: 0,
+        derailedFromRaisedCrossover: false,
         derailHitCount: 0,
         derailHitCooldown: 0,
         flipTimer: 0,
@@ -768,11 +770,11 @@
         group.add(deck);
 
         for (const side of [-1, 1]) {
-          const rail = new THREE.Mesh(createCurveRailGeometry(piece.type, side), railMat);
+          const rail = createOutlinedRail(createCurveRailGeometry(piece.type, side), railMat);
           group.add(rail);
         }
         for (let lane = 1; lane < state.laneCount; lane += 1) {
-          const marker = new THREE.Mesh(createCurveLaneMarkerGeometry(piece.type, lane), railMat);
+          const marker = createOutlinedRail(createCurveLaneMarkerGeometry(piece.type, lane), railMat);
           group.add(marker);
         }
       } else {
@@ -790,7 +792,7 @@
           group.add(createLaneTransitionRails(piece.type, deck.position.y, railMat, mat));
         } else {
           for (const side of [-1, 1]) {
-          const rail = new THREE.Mesh(
+          const rail = createOutlinedRail(
             new THREE.BoxGeometry(CONFIG.railWidth, CONFIG.railHeight, pieceLength),
             railMat
           );
@@ -825,7 +827,7 @@
 
     function createStraightDivider(lane, deckY, railMat) {
       const trackWidth = getTrackWidth();
-      const divider = new THREE.Mesh(
+      const divider = createOutlinedRail(
         new THREE.BoxGeometry(CONFIG.railWidth, CONFIG.railHeight, CONFIG.tile),
         railMat
       );
@@ -835,6 +837,17 @@
         0
       );
       return divider;
+    }
+
+    function createOutlinedRail(geometry, material) {
+      const group = new THREE.Group();
+      const mesh = new THREE.Mesh(geometry, material);
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(geometry, 20),
+        new THREE.LineBasicMaterial({ color: CONFIG.colors.railEdge })
+      );
+      group.add(mesh, edges);
+      return group;
     }
 
     function isLaneTransitionPiece(type) {
@@ -872,6 +885,7 @@
               {
                 width: CONFIG.railWidth,
                 height: CONFIG.railHeight,
+                outline: true,
                 yOffset: (t) => getLaneVerticalOffset(type, lane, getLaneEndForPiece(type, lane), t),
               }
             ));
@@ -888,6 +902,7 @@
             {
               width: CONFIG.railWidth,
               height: CONFIG.railHeight,
+              outline: true,
               yOffset: spec.raised ? (t) => Math.sin(Math.PI * t) * 0.58 : undefined,
             }
           ));
@@ -970,10 +985,8 @@
       if (visibleChunks.length !== 1 || visibleChunks[0].length !== points.length) {
         const group = new THREE.Group();
         visibleChunks.forEach((visiblePoints) => {
-          group.add(new THREE.Mesh(
-            createPathRibbonGeometry(visiblePoints, width, height, baseY, yOffset),
-            material
-          ));
+          const geometry = createPathRibbonGeometry(visiblePoints, width, height, baseY, yOffset);
+          group.add(options.outline ? createOutlinedRail(geometry, material) : new THREE.Mesh(geometry, material));
         });
         group.traverse((child) => {
           if (child.isMesh) {
@@ -981,11 +994,8 @@
         });
         return group;
       }
-      const mesh = new THREE.Mesh(
-        createPathRibbonGeometry(points, width, height, baseY, yOffset),
-        material
-      );
-      return mesh;
+      const geometry = createPathRibbonGeometry(points, width, height, baseY, yOffset);
+      return options.outline ? createOutlinedRail(geometry, material) : new THREE.Mesh(geometry, material);
     }
 
     function createPathRibbonGeometry(points, width, height, baseY, yOffset) {
@@ -1311,6 +1321,8 @@
       actor.derailState = 'none';
       actor.flightVelocity.set(0, 0, 0);
       actor.spinVelocity.set(0, 0, 0);
+      actor.flightTime = 0;
+      actor.derailedFromRaisedCrossover = false;
       actor.derailHitCount = 0;
       actor.derailHitCooldown = 0;
       actor.flipTimer = 0;
@@ -1451,6 +1463,10 @@
               ...baseNode,
               pos,
               laneFloat,
+              laneStart,
+              laneEnd,
+              pieceT: t,
+              raisedCrossover: isRaisedCrossoverRoute(piece?.type, laneStart, laneEnd),
             });
             if (nodes.length > 1 && nodes[nodes.length - 2].pos.distanceTo(nodes[nodes.length - 1].pos) < 0.02) {
               nodes.pop();
@@ -1510,10 +1526,14 @@
     }
 
     function getLaneVerticalOffset(type, laneStart, laneEnd, t) {
-      if (type === 'crossover' && laneStart === 0 && laneEnd === state.laneCount - 1) {
+      if (isRaisedCrossoverRoute(type, laneStart, laneEnd)) {
         return Math.sin(Math.PI * t) * 0.58;
       }
       return 0;
+    }
+
+    function isRaisedCrossoverRoute(type, laneStart, laneEnd) {
+      return type === 'crossover' && state.laneCount >= 3 && laneStart === 0 && laneEnd === state.laneCount - 1;
     }
 
     function samplePiecePath(node) {
@@ -1605,6 +1625,7 @@
       physicsWorld.step(CONFIG.physics.fixedStep, dt, 3);
       carActors.forEach((actor) => {
         if (!actor.stopped && !actor.derailed) {
+          resolveCrossoverUnderpassConstraint(actor);
           resolveRailCollision(actor);
           resolveActiveCarObstacleCollision(actor);
         }
@@ -1673,8 +1694,12 @@
         actor.pressure += excess * excess * physics.curvePressure * dt * 0.28;
         if (excess > 0) actor.body.velocity.scale(Math.max(0.82, 1 - physics.curveRailLoss * dt), actor.body.velocity);
       } else if (guide.piece?.type === 'crossover' || guide.piece?.type === 'wave') {
-        const excess = Math.max(0, actor.speed - physics.curveSafeSpeed * 1.12);
-        actor.pressure += excess * excess * physics.curvePressure * dt * 0.18;
+        if (guide.piece?.type === 'wave' || guide.prev.raisedCrossover || guide.node.raisedCrossover) {
+          const excess = Math.max(0, actor.speed - physics.curveSafeSpeed * 1.12);
+          actor.pressure += excess * excess * physics.curvePressure * dt * 0.18;
+        } else {
+          actor.pressure = Math.max(0, actor.pressure - physics.stabilityRecover * dt * 0.5);
+        }
       } else {
         actor.pressure = Math.max(0, actor.pressure - physics.stabilityRecover * dt);
       }
@@ -1791,6 +1816,60 @@
       });
     }
 
+    function resolveCrossoverUnderpassConstraint(actor) {
+      if (state.laneCount < 3) return;
+      const guide = getGuideTarget(actor, false);
+      if (guide?.piece?.type !== 'crossover' || guide.node.raisedCrossover || guide.prev.raisedCrossover) return;
+      const bridge = getRaisedCrossoverBridgeHit(guide.piece, actor.body.position);
+      if (!bridge) return;
+
+      const undersideY = bridge.surfaceY - CONFIG.trackHeight - CONFIG.physics.invertedGroundClearance;
+      const lowerGroundY = getGuideGroundY(actor, guide);
+      if (undersideY <= lowerGroundY + 0.04) return;
+      if (actor.body.position.y <= undersideY) return;
+      actor.body.position.y = undersideY;
+      actor.body.velocity.y = Math.min(0, actor.body.velocity.y);
+    }
+
+    function getGuideGroundY(actor, guide) {
+      const current = new THREE.Vector3(actor.body.position.x, 0, actor.body.position.z);
+      const prev = new THREE.Vector3(guide.prev.pos.x, 0, guide.prev.pos.z);
+      const next = new THREE.Vector3(guide.node.pos.x, 0, guide.node.pos.z);
+      const projected = closestPointOnSegmentWithT(current, prev, next);
+      return THREE.MathUtils.lerp(guide.prev.pos.y, guide.node.pos.y, projected.t);
+    }
+
+    function getRaisedCrossoverBridgeHit(piece, point) {
+      const probe = new THREE.Vector3(point.x, point.y ?? 0, point.z);
+      const path = getRaisedCrossoverWorldPath(piece);
+      let best = null;
+      for (let i = 0; i < path.length - 1; i += 1) {
+        const hit = closestPointOnSegmentWithT(probe, path[i].pos, path[i + 1].pos);
+        const flatDelta = probe.clone().sub(hit.point);
+        flatDelta.y = 0;
+        const offset = flatDelta.length();
+        const limit = getLaneWidth() * 0.5 + CONFIG.physics.carRadius;
+        if (offset > limit) continue;
+        const t = THREE.MathUtils.lerp(path[i].t, path[i + 1].t, hit.t);
+        const surfaceY = driveHeight(piece) + getLaneVerticalOffset('crossover', 0, state.laneCount - 1, t);
+        if (!best || surfaceY > best.surfaceY || offset < best.offset) {
+          best = { offset, surfaceY };
+        }
+      }
+      return best;
+    }
+
+    function getRaisedCrossoverWorldPath(piece) {
+      const rotation = -piece.rotation * Math.PI * 0.5;
+      const origin = new THREE.Vector3(piece.x * CONFIG.tile, 0, piece.z * CONFIG.tile);
+      return createLaneLocalPath('crossover', 0, 36, 0).map((point) => {
+        const pos = new THREE.Vector3(point.x, 0, point.z)
+          .applyAxisAngle(new THREE.Vector3(0, 1, 0), rotation)
+          .add(origin);
+        return { pos, t: point.t };
+      });
+    }
+
     function getNearestTrackBoundary(point) {
       let best = null;
       for (let i = 0; i < state.carPath.length - 1; i += 1) {
@@ -1829,9 +1908,12 @@
     function getNearestLaneBoundary(actor, point) {
       let best = null;
       const path = actor.lanePath.length > 1 ? actor.lanePath : state.carPath;
-      for (let i = 0; i < path.length - 1; i += 1) {
+      const isLoop = state.trackLoops && path.length > 2;
+      const centerIndex = THREE.MathUtils.clamp(actor.targetIndex - 1, 0, Math.max(0, path.length - 1));
+      const windowSize = CONFIG.physics.laneCollisionWindow;
+      const visitSegment = (i, nextIndex) => {
         const a = path[i].pos;
-        const b = path[i + 1].pos;
+        const b = path[nextIndex].pos;
         const nearest = closestPointOnSegment(point, a, b);
         const flatDelta = point.clone().sub(nearest);
         flatDelta.y = 0;
@@ -1843,20 +1925,15 @@
             limit: getLaneWidth() * 0.5 - CONFIG.physics.carRadius + CONFIG.physics.laneClearance,
           };
         }
-      }
-      if (state.trackLoops && path.length > 2) {
-        const a = path[path.length - 1].pos;
-        const b = path[0].pos;
-        const nearest = closestPointOnSegment(point, a, b);
-        const flatDelta = point.clone().sub(nearest);
-        flatDelta.y = 0;
-        const offset = flatDelta.length();
-        if (!best || offset < best.offset) {
-          best = {
-            nearest,
-            offset,
-            limit: getLaneWidth() * 0.5 - CONFIG.physics.carRadius + CONFIG.physics.laneClearance,
-          };
+      };
+
+      for (let delta = -windowSize; delta <= windowSize; delta += 1) {
+        let i = centerIndex + delta;
+        if (isLoop) {
+          i = (i + path.length) % path.length;
+          visitSegment(i, (i + 1) % path.length);
+        } else if (i >= 0 && i < path.length - 1) {
+          visitSegment(i, i + 1);
         }
       }
       return best;
@@ -1944,11 +2021,13 @@
       actor.stopped = false;
       actor.finished = true;
       actor.pressure = CONFIG.physics.derailPressure;
+      actor.flightTime = 0;
+      actor.derailedFromRaisedCrossover = Boolean(guide.prev.raisedCrossover || guide.node.raisedCrossover);
       actor.derailHitCount = 0;
       actor.derailHitCooldown = 0;
       actor.flipTimer = 0;
-      actor.flightVelocity.copy(tangent.multiplyScalar(forwardSpeed * 0.72));
-      actor.flightVelocity.add(side.multiplyScalar(forwardSpeed * 0.46));
+      actor.flightVelocity.copy(tangent.multiplyScalar(forwardSpeed * 0.92));
+      actor.flightVelocity.add(side.multiplyScalar(forwardSpeed * 0.38));
       actor.flightVelocity.y = Math.min(4.8, 1.6 + forwardSpeed * 0.16);
       actor.spinVelocity.set(
         4.2 + Math.random() * 3.2,
@@ -1976,8 +2055,9 @@
         return;
       }
 
+      actor.flightTime += dt;
       actor.flightVelocity.y -= CONFIG.physics.flightGravity * dt;
-      actor.flightVelocity.multiplyScalar(Math.max(CONFIG.physics.flightAirDamping - dt * 0.08, 0.9));
+      actor.flightVelocity.y *= Math.max(CONFIG.physics.flightAirDamping - dt * 0.08, 0.9);
       actor.mesh.position.add(actor.flightVelocity.clone().multiplyScalar(dt));
       resolveDerailedRailCollision(actor);
       resolveDerailedCarCollisions(actor);
@@ -2234,6 +2314,7 @@
         const a = actor.lanePath[i].pos;
         const b = actor.lanePath[i + 1].pos;
         const hit = closestPointOnSegmentWithT(point, a, b);
+        if (!canRejoinAtHeight(actor, point, hit.point)) continue;
         const flatDelta = point.clone().sub(hit.point);
         flatDelta.y = 0;
         const offset = flatDelta.length();
@@ -2251,20 +2332,33 @@
         const a = actor.lanePath[lastIndex].pos;
         const b = actor.lanePath[0].pos;
         const hit = closestPointOnSegmentWithT(point, a, b);
-        const flatDelta = point.clone().sub(hit.point);
-        flatDelta.y = 0;
-        const offset = flatDelta.length();
-        if (!best || offset < best.offset) {
-          best = {
-            offset,
-            point: hit.point,
-            nextIndex: 0,
-            tangent: b.clone().sub(a),
-          };
+        if (canRejoinAtHeight(actor, point, hit.point)) {
+          const flatDelta = point.clone().sub(hit.point);
+          flatDelta.y = 0;
+          const offset = flatDelta.length();
+          if (!best || offset < best.offset) {
+            best = {
+              offset,
+              point: hit.point,
+              nextIndex: 0,
+              tangent: b.clone().sub(a),
+            };
+          }
         }
       }
       const limit = getLaneWidth() * 0.5 - CONFIG.physics.carRadius + CONFIG.physics.laneClearance;
       return best && best.offset <= limit ? best : null;
+    }
+
+    function canRejoinAtHeight(actor, carPoint, lanePoint) {
+      const laneAboveCar = lanePoint.y - carPoint.y;
+      if (laneAboveCar > CONFIG.physics.rejoinHeightTolerance) return false;
+
+      const carAboveLane = carPoint.y - lanePoint.y;
+      if (carAboveLane <= CONFIG.physics.rejoinHeightTolerance) return true;
+      if (!actor.derailedFromRaisedCrossover) return true;
+      return actor.flightTime >= CONFIG.physics.highToLowRejoinMinFlightTime
+        && actor.flightVelocity.y <= CONFIG.physics.highToLowRejoinMaxUpVelocity;
     }
 
     function rejoinTrack(actor, landing) {
@@ -2285,6 +2379,8 @@
       actor.targetIndex = landing.nextIndex;
       actor.flightVelocity.set(0, 0, 0);
       actor.spinVelocity.set(0, 0, 0);
+      actor.flightTime = 0;
+      actor.derailedFromRaisedCrossover = false;
       actor.body.position.set(landing.point.x, landing.point.y, landing.point.z);
       actor.body.velocity.set(tangent.x * speed, 0, tangent.z * speed);
       actor.body.force.set(0, 0, 0);

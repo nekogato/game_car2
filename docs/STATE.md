@@ -1,7 +1,7 @@
 # State
 
-Last action: Removed global speed and stability readouts from the HUD because per-car inspection windows now show those details.
+Last action: Added a delay/downward-velocity requirement before raised-crossover derailments may rejoin lower lanes, preventing immediate upper-to-lower snapping.
 
 Current milestone: First playable prototype.
 
-Next step: Playtest the HUD in a browser at `http://localhost:8080`, especially that the compact status row still reads cleanly with multiple cars.
+Next step: Playtest raised crossover runs in a browser at `http://localhost:8080`, especially that upper-lane cars only fall to lower lanes after a real airborne drop.
