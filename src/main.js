@@ -505,7 +505,7 @@
         startSpeed: options.startSpeed ?? CONFIG.physics.startSpeed,
         motorAccel: options.motorAccel ?? CONFIG.physics.motorAccel,
         maxSpeed: options.maxSpeed ?? CONFIG.physics.maxSpeed,
-        weight: options.weight ?? 1,
+        weight: options.weight ?? CONFIG.physics.weight,
       };
       mesh.visible = false;
       scene.add(mesh);
@@ -1824,6 +1824,10 @@
         }
         if (!actor.derailed) syncCarFromPhysics(actor);
       });
+      resolveActiveCarCollisions();
+      carActors.forEach((actor) => {
+        if (!actor.derailed) syncCarFromPhysics(actor);
+      });
       summarizeCars();
       updateHud();
     }
@@ -1918,12 +1922,7 @@
         actor.pressure += excess * excess * physics.curvePressure * dt * 0.28 / stabilityWeight;
         if (excess > 0) actor.body.velocity.scale(Math.max(0.82, 1 - physics.curveRailLoss * dt), actor.body.velocity);
       } else if (guide.piece?.type === 'loop') {
-        if (followsLoopRoute) {
-          const excess = Math.max(0, actor.speed - physics.curveSafeSpeed * 1.22);
-          actor.pressure += excess * excess * physics.curvePressure * dt * 0.22 / stabilityWeight;
-        } else {
-          actor.pressure = Math.max(0, actor.pressure - physics.stabilityRecover * dt * 0.5);
-        }
+        actor.pressure = Math.max(0, actor.pressure - physics.stabilityRecover * dt * 0.5);
       } else if (guide.piece?.type === 'crossover' || guide.piece?.type === 'wave') {
         if (guide.piece?.type === 'wave' || guide.prev.raisedCrossover || guide.node.raisedCrossover) {
           const excess = Math.max(0, actor.speed - physics.curveSafeSpeed * 1.12);
@@ -2063,6 +2062,96 @@
       });
     }
 
+    function resolveActiveCarCollisions() {
+      for (let i = 0; i < carActors.length; i += 1) {
+        const a = carActors[i];
+        if (!a.mesh.visible || a.stopped || a.derailed) continue;
+        for (let j = i + 1; j < carActors.length; j += 1) {
+          const b = carActors[j];
+          if (!b.mesh.visible || b.stopped || b.derailed) continue;
+          resolveActiveCarPairCollision(a, b);
+        }
+      }
+    }
+
+    function resolveActiveCarPairCollision(a, b) {
+      const footprintA = getCarCollisionFootprint(a);
+      const footprintB = getCarCollisionFootprint(b);
+      const hit = closestPointsBetweenSegments2D(footprintA.rear, footprintA.front, footprintB.rear, footprintB.front);
+      const minDistance = CONFIG.physics.carCollisionHalfWidth * 2 + CONFIG.physics.carCollisionSkin;
+      if (hit.distance >= minDistance) return;
+
+      let normal = hit.a.clone().sub(hit.b);
+      normal.y = 0;
+      if (normal.lengthSq() <= 0.0001) {
+        normal = footprintA.forward.clone();
+        normal.y = 0;
+      }
+      if (normal.lengthSq() <= 0.0001) normal.set(1, 0, 0);
+      normal.normalize();
+
+      const penetration = minDistance - hit.distance + 0.002;
+      const totalMass = Math.max(0.001, a.body.mass + b.body.mass);
+      const aShare = b.body.mass / totalMass;
+      const bShare = a.body.mass / totalMass;
+      a.body.position.x += normal.x * penetration * aShare;
+      a.body.position.z += normal.z * penetration * aShare;
+      b.body.position.x -= normal.x * penetration * bShare;
+      b.body.position.z -= normal.z * penetration * bShare;
+
+      const velocityA = new THREE.Vector3(a.body.velocity.x, 0, a.body.velocity.z);
+      const velocityB = new THREE.Vector3(b.body.velocity.x, 0, b.body.velocity.z);
+      const relativeSpeed = velocityA.clone().sub(velocityB).dot(normal);
+      if (relativeSpeed >= 0) return;
+
+      const impulse = -relativeSpeed * CONFIG.physics.derailCarBounce;
+      a.body.velocity.x += normal.x * impulse * aShare;
+      a.body.velocity.z += normal.z * impulse * aShare;
+      b.body.velocity.x -= normal.x * impulse * bShare;
+      b.body.velocity.z -= normal.z * impulse * bShare;
+      a.pressure = Math.min(getEffectiveDerailPressure(a) * 0.98, a.pressure + impulse * 0.08);
+      b.pressure = Math.min(getEffectiveDerailPressure(b) * 0.98, b.pressure + impulse * 0.08);
+    }
+
+    function getCarCollisionFootprint(actor) {
+      const center = new THREE.Vector3(actor.body.position.x, 0, actor.body.position.z);
+      const forward = actor.routeForward?.clone() ?? new THREE.Vector3(0, 0, -1);
+      forward.y = 0;
+      if (forward.lengthSq() <= 0.0001) forward.set(0, 0, -1);
+      forward.normalize();
+      return {
+        rear: center.clone().add(forward.clone().multiplyScalar(-CONFIG.physics.carCollisionHalfLength)),
+        front: center.clone().add(forward.clone().multiplyScalar(CONFIG.physics.carCollisionHalfLength)),
+        forward,
+      };
+    }
+
+    function closestPointsBetweenSegments2D(a0, a1, b0, b1) {
+      let best = { distance: Infinity, a: a0.clone(), b: b0.clone() };
+      const consider = (a, b) => {
+        const distance = Math.hypot(a.x - b.x, a.z - b.z);
+        if (distance < best.distance) best = { distance, a, b };
+      };
+      const aB0 = closestPointOnSegment2D(b0, a0, a1);
+      const aB1 = closestPointOnSegment2D(b1, a0, a1);
+      const bA0 = closestPointOnSegment2D(a0, b0, b1);
+      const bA1 = closestPointOnSegment2D(a1, b0, b1);
+      consider(aB0, b0);
+      consider(aB1, b1);
+      consider(a0, bA0);
+      consider(a1, bA1);
+      return best;
+    }
+
+    function closestPointOnSegment2D(point, a, b) {
+      const ab = new THREE.Vector3(b.x - a.x, 0, b.z - a.z);
+      const lengthSq = ab.x * ab.x + ab.z * ab.z;
+      if (lengthSq <= 0.0001) return a.clone();
+      const ap = new THREE.Vector3(point.x - a.x, 0, point.z - a.z);
+      const t = THREE.MathUtils.clamp((ap.x * ab.x + ap.z * ab.z) / lengthSq, 0, 1);
+      return new THREE.Vector3(a.x + ab.x * t, 0, a.z + ab.z * t);
+    }
+
     function resolveCrossoverUnderpassConstraint(actor) {
       if (state.laneCount < 3) return;
       const guide = getGuideTarget(actor, false);
@@ -2096,7 +2185,7 @@
         const flatDelta = probe.clone().sub(hit.point);
         flatDelta.y = 0;
         const offset = flatDelta.length();
-        const limit = getLaneWidth() * 0.5 + CONFIG.physics.carRadius;
+        const limit = getLaneWidth() * 0.5 + CONFIG.physics.carCollisionHalfWidth;
         if (offset > limit) continue;
         const t = THREE.MathUtils.lerp(path[i].t, path[i + 1].t, hit.t);
         const surfaceY = path[i].surfaceY !== undefined && path[i + 1].surfaceY !== undefined
@@ -2139,7 +2228,7 @@
           best = {
             nearest,
             offset,
-            limit: getTrackWidth() * 0.5 - CONFIG.physics.carRadius,
+            limit: getTrackWidth() * 0.5 - CONFIG.physics.carCollisionHalfWidth - CONFIG.physics.laneClearance,
           };
         }
       }
@@ -2154,7 +2243,7 @@
           best = {
             nearest,
             offset,
-            limit: getTrackWidth() * 0.5 - CONFIG.physics.carRadius,
+            limit: getTrackWidth() * 0.5 - CONFIG.physics.carCollisionHalfWidth - CONFIG.physics.laneClearance,
           };
         }
       }
@@ -2178,7 +2267,7 @@
           best = {
             nearest,
             offset,
-            limit: getLaneWidth() * 0.5 - CONFIG.physics.carRadius + CONFIG.physics.laneClearance,
+            limit: getLaneWidth() * 0.5 - CONFIG.physics.carCollisionHalfWidth - CONFIG.physics.laneClearance,
           };
         }
       };
@@ -2215,7 +2304,10 @@
       const current = new THREE.Vector3(actor.body.position.x, actor.body.position.y, actor.body.position.z);
       const path = actor.lanePath.length > 1 ? actor.lanePath : state.carPath;
       const isLoop = state.trackLoops && path.length > 2;
-      while (advance) {
+      const nearestSegment = findNearestGuideSegment(path, current, actor.targetIndex, isLoop);
+      if (nearestSegment) actor.targetIndex = nearestSegment.nextIndex;
+      const canAdvance = advance && !isMovingBackwardOnGuide(actor, path, isLoop);
+      while (canAdvance) {
         const here = path[actor.targetIndex].pos;
         if (current.distanceTo(here) > CONFIG.physics.lookAhead) break;
         actor.targetIndex += 1;
@@ -2238,6 +2330,48 @@
         prev: { ...prev, pos: lanePrev },
         node: { ...node, pos: laneTarget },
       };
+    }
+
+    function isMovingBackwardOnGuide(actor, path, isLoop) {
+      if (!path || actor.targetIndex >= path.length || (!isLoop && actor.targetIndex <= 0)) return false;
+      const prevIndex = isLoop
+        ? (actor.targetIndex - 1 + path.length) % path.length
+        : actor.targetIndex - 1;
+      const tangent = path[actor.targetIndex].pos.clone().sub(path[prevIndex].pos);
+      if (tangent.lengthSq() <= 0.0001) return false;
+      tangent.normalize();
+      const velocity = new THREE.Vector3(actor.body.velocity.x, actor.body.velocity.y, actor.body.velocity.z);
+      return velocity.dot(tangent) < -0.05;
+    }
+
+    function findNearestGuideSegment(path, current, targetIndex, isLoop) {
+      if (!path || path.length < 2) return null;
+      const center = THREE.MathUtils.clamp(targetIndex, 1, path.length - 1);
+      const windowSize = Math.max(CONFIG.physics.laneCollisionWindow, 12);
+      let best = null;
+
+      const visit = (prevIndex, nextIndex) => {
+        const a = path[prevIndex];
+        const b = path[nextIndex];
+        if (!a || !b) return;
+        const hit = closestPointOnSegmentWithT(current, a.pos, b.pos);
+        const distanceSq = current.distanceToSquared(hit.point);
+        if (!best || distanceSq < best.distanceSq) {
+          best = { distanceSq, nextIndex };
+        }
+      };
+
+      for (let delta = -windowSize; delta <= windowSize; delta += 1) {
+        const nextRaw = center + delta;
+        if (isLoop) {
+          const nextIndex = (nextRaw + path.length) % path.length;
+          const prevIndex = (nextIndex - 1 + path.length) % path.length;
+          visit(prevIndex, nextIndex);
+        } else if (nextRaw > 0 && nextRaw < path.length) {
+          visit(nextRaw - 1, nextRaw);
+        }
+      }
+      return best;
     }
 
     function offsetPathNodeForLane(node, laneIndex) {
@@ -2641,7 +2775,7 @@
           }
         }
       }
-      const limit = getLaneWidth() * 0.5 - CONFIG.physics.carRadius + CONFIG.physics.laneClearance;
+      const limit = getLaneWidth() * 0.5 - CONFIG.physics.carCollisionHalfWidth - CONFIG.physics.laneClearance;
       return best && best.offset <= limit ? best : null;
     }
 

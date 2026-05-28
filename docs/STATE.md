@@ -1,7 +1,7 @@
 # State
 
-Last action: Changed climb stalls so speed loss alone only causes rollback; stalled cars drop only when they are on unsupported side/top loop surfaces, and stall guide force no longer pushes them forward.
+Last action: Reduced corner speed loss by raising curve safe speed, lowering curve rail loss, reducing lateral tire damping, and preserving more speed on sideboard contact.
 
 Current milestone: First playable prototype.
 
-Next step: Playtest slow loop climbs; cars should roll back on supported uphill sections, fall only from unsupported side/top sections, and avoid sudden unpushed forward launches.
+Next step: Playtest sharp curves at medium and high speed; cars should keep more speed while still accumulating derail risk when overdriven.

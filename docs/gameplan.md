@@ -31,21 +31,24 @@ A browser-based 3D toy racing game where the player builds a mini 4WD-style trac
 - Multiple cars are represented by separate cannon-es sphere bodies so car-to-car contact is resolved by the physics world.
 - Each car gets a fixed lane path at launch; lane-change pieces smoothly move that path into the adjacent lane.
 - Crossover lane-change pieces can swap outer lanes with a raised overpass path while the middle lane snakes aside.
-- Loop raised-lane pieces follow crossover routing: lower lanes stay on the crossover underpass paths, while the raised crossover path becomes a short entry straight, one full vertical elliptical loop, then a short exit straight.
+- Loop raised-lane pieces follow crossover routing: lower lanes stay on the crossover underpass paths, while the raised crossover path becomes a short entry straight, one full vertical elliptical loop, then a short exit straight. Loop routes recover pressure rather than adding derail pressure.
 - Loop raised-lane geometry uses fixed upward surface normals on straight portions and inward radial normals through the loop so the track surface faces the loop center without twisting.
 - Loop raised-lane car guidance samples the same loop curve used by the visual mesh and uses 3D steering through the loop so cars follow the visible ring instead of a flat lane projection.
 - Car body orientation keeps a continuous track-forward direction through loop transitions and uses the same look-at convention on flat and looped surfaces so entering a loop cannot visually flip the car 180 degrees.
+- Cars relocalize to the nearest lane segment while driving, including during rollback, so slope, curve, and loop orientation are calculated from the car's current track position.
 - Lane dividers are full-height sideboards and each car is physically constrained to its assigned lane.
 - Curves are sampled as continuous quarter-circle arcs instead of center-point right angles.
 - Uphill segments slow the car; downhill segments add speed.
-- Curves build stability pressure when entered too fast.
+- Curves build stability pressure when entered too fast, with light speed loss so fast cornering feels risky rather than heavily braked.
 - Sideboard collision is calculated against the nearest sampled track segment; the car is pushed back inside the usable lane and loses lateral speed.
+- Sideboard and active car collisions use the car's configured footprint rather than a tiny center point, with elongated car-to-car separation while driving.
 - Closed tracks loop through the start piece instead of ending when the car returns to the start.
 - Tire friction and small lateral wander make cars imperfectly track the centerline.
 - Excess curve pressure makes the car leave the track.
 - Very low speed can stall the car on a climb or stop it on track.
 - Climb stalls keep the car physical and pushable; losing speed alone makes the car roll backward, while only unsupported side/top loop stalls fall without a forward launch after lingering too long.
 - Car setup includes weight: heavier cars accelerate and steer more slowly and climb worse, but build derail pressure more slowly and tolerate more pressure before leaving the track.
+- Default car setup values start at half of each setup control's maximum.
 
 ## Persistence
 
