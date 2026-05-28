@@ -21,7 +21,15 @@
       lastSlope: 0,
       messageTimer: 0,
       selectedCarIndex: null,
+      carDraftColor: CONFIG.colors.cars[0],
     };
+
+    const CAR_COLOR_SWATCHES = [
+      0xe43d30, 0xf47c20, 0xf4bf3a, 0xf7e35f, 0x8bd448,
+      0x1f8f63, 0x2ab7a9, 0x2f68bf, 0x4057d8, 0x7c4cc2,
+      0xd94fb0, 0xffffff, 0xd8d8d8, 0x8e9a9a, 0x1f2a16,
+      0x6b3f2a, 0xc9d7a0, 0xf4efd2, 0x101820, 0xf25f7a,
+    ];
 
     const canvas = document.querySelector('#game');
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -76,10 +84,11 @@
     const carWindowTitle = document.querySelector('#carWindowTitle');
     const closeCarWindowBtn = document.querySelector('#closeCarWindowBtn');
     const launchCarBtn = document.querySelector('#launchCarBtn');
-    const carColorInput = document.querySelector('#carColorInput');
+    const carColorSwatches = document.querySelector('#carColorSwatches');
     const carStartSpeedInput = document.querySelector('#carStartSpeedInput');
     const carMotorInput = document.querySelector('#carMotorInput');
     const carMaxSpeedInput = document.querySelector('#carMaxSpeedInput');
+    const carWeightInput = document.querySelector('#carWeightInput');
     const carInfoWindow = document.querySelector('#carInfoWindow');
     const carInfoWindowTitle = document.querySelector('#carInfoWindowTitle');
     const closeCarInfoWindowBtn = document.querySelector('#closeCarInfoWindowBtn');
@@ -93,6 +102,7 @@
     const carInfoDerailRisk = document.querySelector('#carInfoDerailRisk');
     const carInfoStability = document.querySelector('#carInfoStability');
     const carInfoMotor = document.querySelector('#carInfoMotor');
+    const carInfoWeight = document.querySelector('#carInfoWeight');
     const carWindowDrag = {
       active: false,
       offsetX: 0,
@@ -111,6 +121,7 @@
     const carActors = [];
 
     setupWorld();
+    setupCarColorSwatches();
     setCarCount(CONFIG.defaultCarCount);
     bindUi();
     loadSavedTrack();
@@ -320,6 +331,32 @@
       });
     }
 
+    function setupCarColorSwatches() {
+      if (!carColorSwatches) return;
+      carColorSwatches.innerHTML = '';
+      CAR_COLOR_SWATCHES.forEach((color) => {
+        const button = document.createElement('button');
+        const colorHex = `#${color.toString(16).padStart(6, '0')}`;
+        button.type = 'button';
+        button.className = 'color-swatch';
+        button.title = colorHex.toUpperCase();
+        button.style.background = colorHex;
+        button.dataset.color = String(color);
+        button.addEventListener('click', () => {
+          state.carDraftColor = color;
+          updateCarColorSwatches();
+        });
+        carColorSwatches.appendChild(button);
+      });
+      updateCarColorSwatches();
+    }
+
+    function updateCarColorSwatches() {
+      carColorSwatches?.querySelectorAll('.color-swatch').forEach((button) => {
+        button.classList.toggle('active', Number(button.dataset.color) === state.carDraftColor);
+      });
+    }
+
     function setMode(mode) {
       state.mode = mode;
       carActors.forEach((actor) => {
@@ -440,10 +477,11 @@
 
     function launchConfiguredCar() {
       const actor = addConfiguredCar({
-        color: Number.parseInt(carColorInput.value.slice(1), 16),
+        color: state.carDraftColor,
         startSpeed: Number(carStartSpeedInput.value),
         motorAccel: Number(carMotorInput.value),
         maxSpeed: Number(carMaxSpeedInput.value),
+        weight: Number(carWeightInput.value),
       });
       if (!actor) return;
       closeCarWindow();
@@ -467,11 +505,12 @@
         startSpeed: options.startSpeed ?? CONFIG.physics.startSpeed,
         motorAccel: options.motorAccel ?? CONFIG.physics.motorAccel,
         maxSpeed: options.maxSpeed ?? CONFIG.physics.maxSpeed,
+        weight: options.weight ?? 1,
       };
       mesh.visible = false;
       scene.add(mesh);
       const body = new CANNON.Body({
-        mass: 1,
+        mass: params.weight,
         shape: new CANNON.Sphere(CONFIG.physics.carRadius),
         position: new CANNON.Vec3(0, 0, 0),
         linearDamping: 0.16,
@@ -493,6 +532,7 @@
         laneIndex: index % state.laneCount,
         lanePath: [],
         lowSpeedTime: 0,
+        climbStallTime: 0,
         derailed: false,
         derailState: 'none',
         flightVelocity: new THREE.Vector3(),
@@ -503,6 +543,7 @@
         derailHitCooldown: 0,
         flipTimer: 0,
         flipYaw: 0,
+        routeForward: new THREE.Vector3(0, 0, -1),
         params,
       };
       actor.mesh.traverse((child) => {
@@ -677,7 +718,7 @@
     }
 
     function getPieceCellLength(type) {
-      return type === 'crossover' ? 2 : 1;
+      return type === 'crossover' || type === 'loop' ? 2 : 1;
     }
 
     function getPieceWorldLength(type) {
@@ -777,6 +818,8 @@
           const marker = createOutlinedRail(createCurveLaneMarkerGeometry(piece.type, lane), railMat);
           group.add(marker);
         }
+      } else if (piece.type === 'loop') {
+        group.add(createLoopTrackPiece(railMat, mat));
       } else {
         const pieceLength = getPieceWorldLength(piece.type);
         const pieceCenterZ = getPieceLocalCenterZ(piece.type);
@@ -851,14 +894,18 @@
     }
 
     function isLaneTransitionPiece(type) {
-      return type === 'crossover' || type === 'wave';
+      return type === 'crossover' || type === 'wave' || type === 'loop';
+    }
+
+    function createLoopTrackPiece(railMat, deckMat) {
+      return createLaneTransitionRails('loop', CONFIG.trackHeight * 0.5, railMat, deckMat);
     }
 
     function createLaneTransitionRails(type, deckY, railMat, deckMat) {
       const group = new THREE.Group();
       const railY = deckY + CONFIG.railBaseOffset;
       const routeMat = new THREE.MeshBasicMaterial({
-        color: type === 'crossover' ? CONFIG.colors.crossover : CONFIG.colors.track,
+        color: type === 'crossover' || type === 'loop' ? CONFIG.colors.crossover : CONFIG.colors.track,
       });
 
       for (let lane = 0; lane < state.laneCount; lane += 1) {
@@ -875,7 +922,7 @@
         );
         group.add(strip);
 
-        if (type !== 'crossover' || state.laneCount < 3) {
+        if ((type !== 'crossover' && type !== 'loop') || state.laneCount < 3) {
           for (const side of [-0.5, 0.5]) {
             const sidePath = createLaneLocalPath(type, lane, 36, side);
             group.add(createPathSegments(
@@ -893,17 +940,18 @@
         }
       }
 
-      if (type === 'crossover' && state.laneCount >= 3) {
-        createCrossoverRailSpecs().forEach((spec) => {
+      if ((type === 'crossover' || type === 'loop') && state.laneCount >= 3) {
+        const railSpecs = type === 'loop' ? createLoopRailSpecs() : createCrossoverRailSpecs();
+        railSpecs.forEach((spec) => {
           group.add(createPathSegments(
-            createCrossoverRailPath(spec),
+            createCrossoverRailPath(spec, 48, type),
             railY,
             railMat,
             {
               width: CONFIG.railWidth,
               height: CONFIG.railHeight,
               outline: true,
-              yOffset: spec.raised ? (t) => Math.sin(Math.PI * t) * 0.58 : undefined,
+              yOffset: spec.raised ? (t) => getLaneVerticalOffset(type, 0, state.laneCount - 1, t) : undefined,
             }
           ));
         });
@@ -934,16 +982,25 @@
       ];
     }
 
-    function createCrossoverRailPath(spec, segments = 48) {
+    function createLoopRailSpecs() {
+      return createCrossoverRailSpecs();
+    }
+
+    function createCrossoverRailPath(spec, segments = 48, type = 'crossover') {
       const length = getPieceWorldLength('crossover');
       const points = [];
       for (let i = 0; i <= segments; i += 1) {
         const t = i / segments;
         const eased = t * t * (3 - 2 * t);
         const wave = Math.sin(Math.PI * 2 * t) * spec.wave;
+        const loopPoint = spec.raised && type === 'loop'
+          ? getLoopCrossoverPoint(t, spec.start, spec.end, spec.wave)
+          : null;
         points.push({
-          x: getLaneOffsetForFloat(THREE.MathUtils.lerp(spec.start, spec.end, eased) + wave),
-          z: CONFIG.tile * 0.5 - length * t,
+          x: loopPoint?.x ?? getLaneOffsetForFloat(THREE.MathUtils.lerp(spec.start, spec.end, eased) + wave),
+          y: loopPoint?.y,
+          surfaceNormal: loopPoint?.surfaceNormal,
+          z: loopPoint?.z ?? CONFIG.tile * 0.5 - length * t,
           t,
         });
       }
@@ -956,6 +1013,11 @@
       const points = [];
       for (let i = 0; i <= segments; i += 1) {
         const t = i / segments;
+        if (isLoopCrossoverRoute(type, lane, laneEnd)) {
+          const point = getLoopCrossoverPoint(t, lane, laneEnd, -0.26, sideFloat);
+          points.push({ x: point.x, y: point.y, z: point.z, surfaceNormal: point.surfaceNormal, t });
+          continue;
+        }
         const laneFloat = getLaneFloatForPiece(type, lane, laneEnd, t) + sideFloat;
         points.push({
           x: getLaneOffsetForFloat(laneFloat),
@@ -1003,27 +1065,50 @@
       const indices = [];
       const halfWidth = width * 0.5;
       const halfHeight = height * 0.5;
+      const getSurfaceNormal = (point) => {
+        const normal = point.surfaceNormal
+          ? point.surfaceNormal.clone()
+          : new THREE.Vector3(0, 1, 0);
+        if (normal.lengthSq() <= 0.0001) return new THREE.Vector3(0, 1, 0);
+        return normal.normalize();
+      };
+      const getCenter = (point) => {
+        const surfaceNormal = getSurfaceNormal(point);
+        if (point.surfaceNormal) {
+          return new THREE.Vector3(point.x, point.y ?? yOffset(point.t), point.z)
+            .add(surfaceNormal.multiplyScalar(baseY));
+        }
+        return new THREE.Vector3(point.x, baseY + (point.y ?? yOffset(point.t)), point.z);
+      };
 
       points.forEach((point, index) => {
         const prev = points[Math.max(0, index - 1)];
         const next = points[Math.min(points.length - 1, index + 1)];
-        let dx = next.x - prev.x;
-        let dz = next.z - prev.z;
-        const length = Math.hypot(dx, dz) || 1;
-        dx /= length;
-        dz /= length;
-        const nx = dz;
-        const nz = -dx;
-        const y = baseY + yOffset(point.t);
-        const leftX = point.x - nx * halfWidth;
-        const leftZ = point.z - nz * halfWidth;
-        const rightX = point.x + nx * halfWidth;
-        const rightZ = point.z + nz * halfWidth;
+        const center = getCenter(point);
+        const prevCenter = getCenter(prev);
+        const nextCenter = getCenter(next);
+        const tangent = nextCenter.clone().sub(prevCenter);
+        if (tangent.lengthSq() <= 0.0001) {
+          tangent.set(0, 0, -1);
+        } else {
+          tangent.normalize();
+        }
+        const surfaceNormal = getSurfaceNormal(point);
+        const widthDir = tangent.clone().cross(surfaceNormal);
+        if (widthDir.lengthSq() <= 0.0001) {
+          widthDir.set(1, 0, 0);
+        } else {
+          widthDir.normalize();
+        }
+        const leftTop = center.clone().sub(widthDir.clone().multiplyScalar(halfWidth)).add(surfaceNormal.clone().multiplyScalar(halfHeight));
+        const rightTop = center.clone().add(widthDir.clone().multiplyScalar(halfWidth)).add(surfaceNormal.clone().multiplyScalar(halfHeight));
+        const leftBottom = center.clone().sub(widthDir.clone().multiplyScalar(halfWidth)).sub(surfaceNormal.clone().multiplyScalar(halfHeight));
+        const rightBottom = center.clone().add(widthDir.clone().multiplyScalar(halfWidth)).sub(surfaceNormal.clone().multiplyScalar(halfHeight));
         vertices.push(
-          leftX, y + halfHeight, leftZ,
-          rightX, y + halfHeight, rightZ,
-          leftX, y - halfHeight, leftZ,
-          rightX, y - halfHeight, rightZ
+          leftTop.x, leftTop.y, leftTop.z,
+          rightTop.x, rightTop.y, rightTop.z,
+          leftBottom.x, leftBottom.y, leftBottom.z,
+          rightBottom.x, rightBottom.y, rightBottom.z
         );
       });
 
@@ -1317,6 +1402,7 @@
       actor.stopped = false;
       actor.finished = false;
       actor.lowSpeedTime = 0;
+      actor.climbStallTime = 0;
       actor.derailed = false;
       actor.derailState = 'none';
       actor.flightVelocity.set(0, 0, 0);
@@ -1327,6 +1413,7 @@
       actor.derailHitCooldown = 0;
       actor.flipTimer = 0;
       actor.flipYaw = 0;
+      actor.routeForward.copy(startDir);
       actor.mesh.rotation.set(0, 0, 0);
       actor.mesh.visible = true;
       actor.body.position.set(startPos.x, startPos.y, startPos.z);
@@ -1385,7 +1472,7 @@
       const forward = piece.rotation;
       const back = (piece.rotation + 2) % 4;
       if (piece.type === 'start') return forward;
-      if (piece.type === 'straight' || isLaneTransitionPiece(piece.type)) {
+      if (piece.type === 'straight' || isLaneTransitionPiece(piece.type) || piece.type === 'loop') {
         if (incoming === null) return forward;
         if (incoming === back) return forward;
         if (incoming === forward) return back;
@@ -1453,6 +1540,12 @@
           const laneStart = lane;
           const laneEnd = getLaneEndForPiece(piece?.type, lane);
           const span = Math.max(1, end - index - 1);
+          if (isLoopCrossoverRoute(piece?.type, laneStart, laneEnd)) {
+            appendLoopActorLaneNodes(nodes, piece, laneStart, laneEnd, state.carPath[index].pos, state.carPath[end - 1].pos);
+            lane = laneEnd;
+            index = end;
+            continue;
+          }
           for (let i = index; i < end; i += 1) {
             const t = (i - index) / span;
             const laneFloat = getLaneFloatForPiece(piece?.type, laneStart, laneEnd, t);
@@ -1479,6 +1572,51 @@
       return nodes;
     }
 
+    function appendLoopActorLaneNodes(nodes, piece, laneStart, laneEnd, entryPos, exitPos) {
+      const samples = CONFIG.loopPathSamples;
+      const localStart = loopLocalPointToWorld(piece, getLoopCrossoverPoint(0, laneStart, laneEnd, -0.26, 0, 0, 'full'));
+      const localEnd = loopLocalPointToWorld(piece, getLoopCrossoverPoint(1, laneStart, laneEnd, -0.26, 0, 1, 'full'));
+      const reversed = entryPos.distanceTo(localEnd) < entryPos.distanceTo(localStart)
+        || exitPos.distanceTo(localStart) < exitPos.distanceTo(localEnd);
+      for (let i = 0; i <= samples; i += 1) {
+        const t = i / samples;
+        const curveT = reversed ? 1 - t : t;
+        const loopPoint = getLoopCrossoverPoint(curveT, laneStart, laneEnd, -0.26, 0, t, 'full');
+        const pos = loopLocalPointToWorld(piece, loopPoint);
+        const surfaceNormal = loopLocalNormalToWorld(piece, loopPoint.surfaceNormal);
+        nodes.push({
+          pos,
+          piece,
+          surfaceNormal,
+          laneFloat: getLaneFloatForPiece(piece?.type, laneStart, laneEnd, t),
+          laneStart,
+          laneEnd,
+          pieceT: t,
+          loopRoute: true,
+          raisedCrossover: true,
+        });
+        if (nodes.length > 1 && nodes[nodes.length - 2].pos.distanceTo(nodes[nodes.length - 1].pos) < 0.02) {
+          nodes.pop();
+        }
+      }
+    }
+
+    function loopLocalPointToWorld(piece, point) {
+      const rotation = -piece.rotation * Math.PI * 0.5;
+      const surfaceNormal = point.surfaceNormal?.clone() ?? new THREE.Vector3(0, 1, 0);
+      if (surfaceNormal.lengthSq() <= 0.0001) surfaceNormal.set(0, 1, 0);
+      surfaceNormal.normalize();
+      return new THREE.Vector3(point.x, point.y, point.z)
+        .add(surfaceNormal.multiplyScalar(driveHeight(piece)))
+        .applyAxisAngle(new THREE.Vector3(0, 1, 0), rotation)
+        .add(new THREE.Vector3(piece.x * CONFIG.tile, 0, piece.z * CONFIG.tile));
+    }
+
+    function loopLocalNormalToWorld(piece, normal) {
+      const rotation = -piece.rotation * Math.PI * 0.5;
+      return normal.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), rotation).normalize();
+    }
+
     function getLaneCycleLapCount(startLaneIndex) {
       let lane = startLaneIndex;
       for (let lap = 1; lap <= 12; lap += 1) {
@@ -1503,7 +1641,7 @@
 
     function getLaneEndForPiece(type, lane) {
       if (state.laneCount < 2) return lane;
-      if (type === 'crossover') {
+      if (type === 'crossover' || type === 'loop') {
         return (lane + state.laneCount - 1) % state.laneCount;
       }
       return lane;
@@ -1514,10 +1652,10 @@
       if (type === 'wave') {
         return laneStart + Math.sin(Math.PI * 2 * t) * 0.18;
       }
-      if (type === 'crossover' && laneStart === 0 && laneEnd === state.laneCount - 1) {
+      if ((type === 'crossover' || type === 'loop') && laneStart === 0 && laneEnd === state.laneCount - 1) {
         return THREE.MathUtils.lerp(laneStart, laneEnd, eased) + Math.sin(Math.PI * 2 * t) * -0.26;
       }
-      if (type === 'crossover' && laneStart !== 0) {
+      if ((type === 'crossover' || type === 'loop') && laneStart !== 0) {
         const waveAmount = laneStart === 2 ? 0.22 : 0.24;
         const wave = Math.sin(Math.PI * 2 * t) * waveAmount;
         return THREE.MathUtils.lerp(laneStart, laneEnd, eased) + wave;
@@ -1526,6 +1664,9 @@
     }
 
     function getLaneVerticalOffset(type, laneStart, laneEnd, t) {
+      if (isLoopCrossoverRoute(type, laneStart, laneEnd)) {
+        return getLoopVerticalOffset(t);
+      }
       if (isRaisedCrossoverRoute(type, laneStart, laneEnd)) {
         return Math.sin(Math.PI * t) * 0.58;
       }
@@ -1534,6 +1675,58 @@
 
     function isRaisedCrossoverRoute(type, laneStart, laneEnd) {
       return type === 'crossover' && state.laneCount >= 3 && laneStart === 0 && laneEnd === state.laneCount - 1;
+    }
+
+    function isLoopCrossoverRoute(type, laneStart, laneEnd) {
+      return type === 'loop' && state.laneCount >= 3 && laneStart === 0 && laneEnd === state.laneCount - 1;
+    }
+
+    function getLoopVerticalOffset(t) {
+      return getLoopCrossoverPoint(t, 0, state.laneCount - 1, -0.26).y;
+    }
+
+    function getLoopCrossoverPoint(t, laneStart, laneEnd, wave = -0.26, sideFloat = 0, laneT = t, mirrorMode = 'wave') {
+      const length = getPieceWorldLength('loop');
+      const eased = laneT * laneT * (3 - 2 * laneT);
+      const entryEnd = CONFIG.loopEntryPortion;
+      const exitStart = CONFIG.loopExitPortion;
+      const frontZ = CONFIG.tile * 0.5;
+      const backZ = frontZ - length;
+      const loopStartZ = frontZ - CONFIG.loopStraightInset;
+      const loopEndZ = backZ + CONFIG.loopStraightInset;
+      const radiusY = CONFIG.loopHeight * 0.5;
+      const radiusZ = CONFIG.loopDepth * 0.5;
+      let y = 0;
+      let z = loopStartZ;
+      let surfaceNormal = new THREE.Vector3(0, 1, 0);
+
+      if (t < entryEnd) {
+        z = THREE.MathUtils.lerp(frontZ, loopStartZ, t / Math.max(entryEnd, 0.001));
+      } else if (t > exitStart) {
+        z = THREE.MathUtils.lerp(loopEndZ, backZ, (t - exitStart) / Math.max(1 - exitStart, 0.001));
+      } else {
+        const loopT = (t - entryEnd) / (exitStart - entryEnd);
+        const angle = Math.PI * 2 * loopT;
+        const loopCenterZ = THREE.MathUtils.lerp(loopStartZ, loopEndZ, loopT);
+        y = radiusY * (1 - Math.cos(angle));
+        z = loopCenterZ - Math.sin(angle) * radiusZ;
+        surfaceNormal = new THREE.Vector3(0, radiusY - y, loopCenterZ - z).normalize();
+      }
+
+      const waveAmount = CONFIG.loopMirrorLateral && mirrorMode === 'wave' ? -wave : wave;
+      const baseLaneFloat = THREE.MathUtils.lerp(laneStart, laneEnd, eased)
+        + Math.sin(Math.PI * 2 * t) * waveAmount
+        + sideFloat;
+      const laneFloat = CONFIG.loopMirrorLateral && mirrorMode === 'full'
+        ? state.laneCount - 1 - baseLaneFloat
+        : baseLaneFloat;
+      const point = new THREE.Vector3(
+        getLaneOffsetForFloat(laneFloat),
+        y,
+        z
+      );
+      point.surfaceNormal = surfaceNormal;
+      return point;
     }
 
     function samplePiecePath(node) {
@@ -1657,46 +1850,84 @@
       }
 
       const physics = CONFIG.physics;
+      const weight = THREE.MathUtils.clamp(actor.params.weight ?? 1, 0.5, 2);
+      const stabilityWeight = Math.sqrt(weight);
+      const guideStrength = physics.guideStrength / weight;
+      const centeringStrength = physics.centeringStrength / weight;
+      const effectiveDerailPressure = physics.derailPressure * stabilityWeight;
       const current = new THREE.Vector3(actor.body.position.x, actor.body.position.y, actor.body.position.z);
       const desired = guide.target.clone().sub(current);
-      const dir = new THREE.Vector3(desired.x, 0, desired.z);
+      const followsLoopRoute = Boolean(guide.prev.loopRoute || guide.node.loopRoute);
+      const segment = guide.node.pos.clone().sub(guide.prev.pos);
+      const dir = followsLoopRoute
+        ? segment.clone()
+        : new THREE.Vector3(segment.x, 0, segment.z);
+      if (dir.lengthSq() <= 0.0001) {
+        dir.copy(followsLoopRoute ? desired : new THREE.Vector3(desired.x, 0, desired.z));
+      }
       if (dir.lengthSq() > 0.0001) dir.normalize();
+      const flatDir = new THREE.Vector3(dir.x, 0, dir.z);
+      if (flatDir.lengthSq() > 0.0001) flatDir.normalize();
 
-      const speed = Math.hypot(actor.body.velocity.x, actor.body.velocity.z);
+      const speed = followsLoopRoute
+        ? Math.hypot(actor.body.velocity.x, actor.body.velocity.y, actor.body.velocity.z)
+        : Math.hypot(actor.body.velocity.x, actor.body.velocity.z);
       actor.speed = speed;
-      const targetSpeed = THREE.MathUtils.clamp(speed + actor.params.motorAccel * dt, actor.params.startSpeed, actor.params.maxSpeed);
-      const targetVelocity = dir.clone().multiplyScalar(targetSpeed);
-      const steerX = (targetVelocity.x - actor.body.velocity.x) * physics.guideStrength;
-      const steerZ = (targetVelocity.z - actor.body.velocity.z) * physics.guideStrength;
+      const velocityAlongGuide = followsLoopRoute
+        ? actor.body.velocity.x * dir.x + actor.body.velocity.y * dir.y + actor.body.velocity.z * dir.z
+        : actor.body.velocity.x * dir.x + actor.body.velocity.z * dir.z;
+      const driveSpeed = Math.max(0, velocityAlongGuide);
+      const climbSpeedFloor = physics.minClimbSpeed * stabilityWeight;
+      const climbStalling = guide.slope > 0.08 && driveSpeed < climbSpeedFloor;
+      const unsupportedLoopStall = climbStalling
+        && followsLoopRoute
+        && getSegmentSurfaceUp(guide.prev, guide.node) < physics.loopStallFallSurfaceUp;
+      const targetSpeed = climbStalling
+        ? 0
+        : THREE.MathUtils.clamp(driveSpeed + (actor.params.motorAccel / weight) * dt, 0, actor.params.maxSpeed);
+      const targetVelocity = climbStalling
+        ? new THREE.Vector3(0, 0, 0)
+        : dir.clone().multiplyScalar(targetSpeed);
+      const steerX = climbStalling ? 0 : (targetVelocity.x - actor.body.velocity.x) * guideStrength;
+      const steerY = !climbStalling && followsLoopRoute ? (targetVelocity.y - actor.body.velocity.y) * guideStrength : 0;
+      const steerZ = climbStalling ? 0 : (targetVelocity.z - actor.body.velocity.z) * guideStrength;
       const centerCorrection = getCenteringCorrection(current, guide);
-      applyTireFriction(actor, dir, dt);
-      const sideDir = new THREE.Vector3(-dir.z, 0, dir.x);
+      applyTireFriction(actor, flatDir.lengthSq() > 0.0001 ? flatDir : dir, dt);
+      const sideDir = new THREE.Vector3(-flatDir.z, 0, flatDir.x);
       const wander = Math.sin(performance.now() * 0.006 + actor.index * 2.1 + actor.targetIndex * 0.37)
         * physics.tireWander
         * Math.min(actor.speed / actor.params.maxSpeed, 1);
       actor.body.force.set(
-        steerX + centerCorrection.x * physics.centeringStrength + sideDir.x * wander,
-        0,
-        steerZ + centerCorrection.z * physics.centeringStrength + sideDir.z * wander
+        steerX + centerCorrection.x * centeringStrength + sideDir.x * wander,
+        steerY,
+        steerZ + centerCorrection.z * centeringStrength + sideDir.z * wander
       );
 
       state.lastSlope = guide.slope;
       if (guide.slope > 0) {
-        actor.body.velocity.scale(Math.max(0.86, 1 - guide.slope * physics.uphillLoss * dt), actor.body.velocity);
+        actor.body.velocity.scale(Math.max(0.84, 1 - guide.slope * physics.uphillLoss * weight * dt), actor.body.velocity);
       }
       if (guide.slope < 0) {
         actor.body.velocity.x += dir.x * Math.abs(guide.slope) * physics.downhillBoost * dt;
+        if (followsLoopRoute) actor.body.velocity.y += dir.y * Math.abs(guide.slope) * physics.downhillBoost * dt;
         actor.body.velocity.z += dir.z * Math.abs(guide.slope) * physics.downhillBoost * dt;
       }
 
       if (guide.piece?.type === 'curveL' || guide.piece?.type === 'curveR') {
         const excess = Math.max(0, actor.speed - physics.curveSafeSpeed);
-        actor.pressure += excess * excess * physics.curvePressure * dt * 0.28;
+        actor.pressure += excess * excess * physics.curvePressure * dt * 0.28 / stabilityWeight;
         if (excess > 0) actor.body.velocity.scale(Math.max(0.82, 1 - physics.curveRailLoss * dt), actor.body.velocity);
+      } else if (guide.piece?.type === 'loop') {
+        if (followsLoopRoute) {
+          const excess = Math.max(0, actor.speed - physics.curveSafeSpeed * 1.22);
+          actor.pressure += excess * excess * physics.curvePressure * dt * 0.22 / stabilityWeight;
+        } else {
+          actor.pressure = Math.max(0, actor.pressure - physics.stabilityRecover * dt * 0.5);
+        }
       } else if (guide.piece?.type === 'crossover' || guide.piece?.type === 'wave') {
         if (guide.piece?.type === 'wave' || guide.prev.raisedCrossover || guide.node.raisedCrossover) {
           const excess = Math.max(0, actor.speed - physics.curveSafeSpeed * 1.12);
-          actor.pressure += excess * excess * physics.curvePressure * dt * 0.18;
+          actor.pressure += excess * excess * physics.curvePressure * dt * 0.18 / stabilityWeight;
         } else {
           actor.pressure = Math.max(0, actor.pressure - physics.stabilityRecover * dt * 0.5);
         }
@@ -1704,29 +1935,45 @@
         actor.pressure = Math.max(0, actor.pressure - physics.stabilityRecover * dt);
       }
 
-      const currentSpeed = Math.hypot(actor.body.velocity.x, actor.body.velocity.z);
+      const currentSpeed = followsLoopRoute
+        ? Math.hypot(actor.body.velocity.x, actor.body.velocity.y, actor.body.velocity.z)
+        : Math.hypot(actor.body.velocity.x, actor.body.velocity.z);
       if (currentSpeed > actor.params.maxSpeed) {
         actor.body.velocity.scale(actor.params.maxSpeed / currentSpeed, actor.body.velocity);
       }
-      const boostedSpeed = Math.hypot(actor.body.velocity.x, actor.body.velocity.z);
-      if (boostedSpeed < physics.minMotorSpeed && dir.lengthSq() > 0.0001) {
+      const boostedSpeed = followsLoopRoute
+        ? Math.hypot(actor.body.velocity.x, actor.body.velocity.y, actor.body.velocity.z)
+        : Math.hypot(actor.body.velocity.x, actor.body.velocity.z);
+      if (!climbStalling && boostedSpeed < physics.minMotorSpeed && dir.lengthSq() > 0.0001) {
         actor.body.velocity.x += dir.x * (physics.minMotorSpeed - boostedSpeed) * 0.18;
+        if (followsLoopRoute) actor.body.velocity.y += dir.y * (physics.minMotorSpeed - boostedSpeed) * 0.18;
         actor.body.velocity.z += dir.z * (physics.minMotorSpeed - boostedSpeed) * 0.18;
       }
-      actor.speed = Math.hypot(actor.body.velocity.x, actor.body.velocity.z);
+      actor.speed = followsLoopRoute
+        ? Math.hypot(actor.body.velocity.x, actor.body.velocity.y, actor.body.velocity.z)
+        : Math.hypot(actor.body.velocity.x, actor.body.velocity.z);
 
-      if (guide.slope > 0.08 && actor.speed < physics.minClimbSpeed) {
-        failDrive(actor, `第 ${actor.index + 1} 台上坡速度不夠`);
-        return;
+      if (climbStalling) {
+        actor.climbStallTime = unsupportedLoopStall ? actor.climbStallTime + dt : 0;
+        const rollback = guide.slope * physics.climbRollbackAccel * weight * dt;
+        actor.body.velocity.x -= dir.x * rollback;
+        if (followsLoopRoute) actor.body.velocity.y -= Math.max(rollback, physics.flightGravity * dt * 0.18);
+        actor.body.velocity.z -= dir.z * rollback;
+        if (unsupportedLoopStall && actor.climbStallTime > physics.climbStallDropDelay) {
+          dropStalledCar(actor, guide, `第 ${actor.index + 1} 台失速掉下`);
+          return;
+        }
+      } else {
+        actor.climbStallTime = Math.max(0, actor.climbStallTime - dt * 2);
       }
 
       actor.lowSpeedTime = actor.speed <= physics.stallSpeed ? actor.lowSpeedTime + dt : 0;
       if (actor.lowSpeedTime > 1.2) {
-        failDrive(actor, `第 ${actor.index + 1} 台速度太低`);
-        return;
+        actor.body.force.scale(0.25, actor.body.force);
+        actor.body.velocity.scale(0.96, actor.body.velocity);
       }
 
-      if (actor.pressure >= physics.derailPressure) {
+      if (actor.pressure >= effectiveDerailPressure) {
         derailCar(actor, guide);
       }
     }
@@ -1777,7 +2024,7 @@
       actor.body.velocity.x = resolved.x;
       actor.body.velocity.z = resolved.z;
       actor.pressure = Math.min(
-        CONFIG.physics.derailPressure * 0.96,
+        getEffectiveDerailPressure(actor) * 0.96,
         actor.pressure + 0.12 + Math.max(0, normalSpeed) * 0.04
       );
     }
@@ -1806,7 +2053,7 @@
         const bounced = normal.clone().multiplyScalar(-relativeSpeed * CONFIG.physics.derailCarBounce);
         actor.body.velocity.x = tangentVelocity.x + bounced.x;
         actor.body.velocity.z = tangentVelocity.z + bounced.z;
-        actor.pressure = Math.min(CONFIG.physics.derailPressure * 0.98, actor.pressure + Math.abs(relativeSpeed) * 0.16);
+        actor.pressure = Math.min(getEffectiveDerailPressure(actor) * 0.98, actor.pressure + Math.abs(relativeSpeed) * 0.16);
 
         if (!other.stopped) {
           const shove = -relativeSpeed * 0.45;
@@ -1819,7 +2066,8 @@
     function resolveCrossoverUnderpassConstraint(actor) {
       if (state.laneCount < 3) return;
       const guide = getGuideTarget(actor, false);
-      if (guide?.piece?.type !== 'crossover' || guide.node.raisedCrossover || guide.prev.raisedCrossover) return;
+      if (!guide || guide.node.raisedCrossover || guide.prev.raisedCrossover) return;
+      if (guide.piece?.type !== 'crossover' && guide.piece?.type !== 'loop') return;
       const bridge = getRaisedCrossoverBridgeHit(guide.piece, actor.body.position);
       if (!bridge) return;
 
@@ -1851,7 +2099,9 @@
         const limit = getLaneWidth() * 0.5 + CONFIG.physics.carRadius;
         if (offset > limit) continue;
         const t = THREE.MathUtils.lerp(path[i].t, path[i + 1].t, hit.t);
-        const surfaceY = driveHeight(piece) + getLaneVerticalOffset('crossover', 0, state.laneCount - 1, t);
+        const surfaceY = path[i].surfaceY !== undefined && path[i + 1].surfaceY !== undefined
+          ? THREE.MathUtils.lerp(path[i].surfaceY, path[i + 1].surfaceY, hit.t)
+          : driveHeight(piece) + getLaneVerticalOffset('crossover', 0, state.laneCount - 1, t);
         if (!best || surfaceY > best.surfaceY || offset < best.offset) {
           best = { offset, surfaceY };
         }
@@ -1862,6 +2112,12 @@
     function getRaisedCrossoverWorldPath(piece) {
       const rotation = -piece.rotation * Math.PI * 0.5;
       const origin = new THREE.Vector3(piece.x * CONFIG.tile, 0, piece.z * CONFIG.tile);
+      if (piece.type === 'loop') {
+        return createLaneLocalPath('loop', 0, CONFIG.loopPathSamples, 0).map((point) => {
+          const pos = loopLocalPointToWorld(piece, point);
+          return { pos, t: point.t, surfaceY: pos.y };
+        });
+      }
       return createLaneLocalPath('crossover', 0, 36, 0).map((point) => {
         const pos = new THREE.Vector3(point.x, 0, point.z)
           .applyAxisAngle(new THREE.Vector3(0, 1, 0), rotation)
@@ -2005,7 +2261,7 @@
       updateHud();
     }
 
-    function derailCar(actor, guide) {
+    function derailCar(actor, guide, message = null) {
       const tangent = new THREE.Vector3().subVectors(guide.node.pos, guide.prev.pos);
       tangent.y = 0;
       if (tangent.lengthSq() <= 0.0001) tangent.set(0, 0, -1);
@@ -2020,7 +2276,7 @@
       actor.derailState = 'flying';
       actor.stopped = false;
       actor.finished = true;
-      actor.pressure = CONFIG.physics.derailPressure;
+      actor.pressure = getEffectiveDerailPressure(actor);
       actor.flightTime = 0;
       actor.derailedFromRaisedCrossover = Boolean(guide.prev.raisedCrossover || guide.node.raisedCrossover);
       actor.derailHitCount = 0;
@@ -2036,7 +2292,37 @@
       );
       actor.body.velocity.set(0, 0, 0);
       actor.body.force.set(0, 0, 0);
-      showToast(`第 ${actor.index + 1} 台飛出軌`);
+      showToast(message ?? `第 ${actor.index + 1} 台飛出軌`);
+    }
+
+    function dropStalledCar(actor, guide, message) {
+      const tangent = new THREE.Vector3().subVectors(guide.node.pos, guide.prev.pos);
+      if (tangent.lengthSq() <= 0.0001) tangent.set(0, 0, -1);
+      tangent.normalize();
+      const velocity = new THREE.Vector3(actor.body.velocity.x, actor.body.velocity.y, actor.body.velocity.z);
+      const forwardSpeed = velocity.dot(tangent);
+      if (forwardSpeed > 0) velocity.add(tangent.multiplyScalar(-forwardSpeed));
+
+      actor.derailed = true;
+      actor.derailState = 'flying';
+      actor.stopped = false;
+      actor.finished = true;
+      actor.pressure = getEffectiveDerailPressure(actor);
+      actor.flightTime = 0;
+      actor.derailedFromRaisedCrossover = Boolean(guide.prev.raisedCrossover || guide.node.raisedCrossover);
+      actor.derailHitCount = 0;
+      actor.derailHitCooldown = 0;
+      actor.flipTimer = 0;
+      actor.flightVelocity.copy(velocity);
+      actor.flightVelocity.y = Math.min(actor.flightVelocity.y, -CONFIG.physics.flightGravity * 0.18);
+      actor.spinVelocity.set(
+        3.2 + Math.random() * 2.4,
+        (Math.random() - 0.5) * 1.8,
+        4.8 + Math.random() * 2.8
+      );
+      actor.body.velocity.set(0, 0, 0);
+      actor.body.force.set(0, 0, 0);
+      showToast(message);
     }
 
     function updateDerailedCar(actor, dt) {
@@ -2161,6 +2447,7 @@
       const considerPath = (path, limit) => {
         if (!path || path.length < 2) return;
         for (let i = 0; i < path.length - 1; i += 1) {
+          if (!canDerailedCarRestOnSegment(path[i], path[i + 1])) continue;
           const hit = closestPointOnSegmentWithT(point, path[i].pos, path[i + 1].pos);
           const flatDelta = point.clone().sub(hit.point);
           flatDelta.y = 0;
@@ -2170,6 +2457,7 @@
           }
         }
         if (state.trackLoops && path.length > 2) {
+          if (!canDerailedCarRestOnSegment(path[path.length - 1], path[0])) return;
           const hit = closestPointOnSegmentWithT(point, path[path.length - 1].pos, path[0].pos);
           const flatDelta = point.clone().sub(hit.point);
           flatDelta.y = 0;
@@ -2185,6 +2473,12 @@
         considerPath(carActor.lanePath, getLaneWidth() * 0.5 + CONFIG.physics.derailCollisionRadius);
       });
       return best ? best.height : null;
+    }
+
+    function canDerailedCarRestOnSegment(aNode, bNode) {
+      if (!aNode.loopRoute && !bNode.loopRoute) return true;
+      const up = getSegmentSurfaceUp(aNode, bNode);
+      return up >= CONFIG.physics.derailedLandingSurfaceUp;
     }
 
     function settleCarRotation(actor, inverted) {
@@ -2314,6 +2608,7 @@
         const a = actor.lanePath[i].pos;
         const b = actor.lanePath[i + 1].pos;
         const hit = closestPointOnSegmentWithT(point, a, b);
+        if (!canRejoinOnSegment(actor, a, b)) continue;
         if (!canRejoinAtHeight(actor, point, hit.point)) continue;
         const flatDelta = point.clone().sub(hit.point);
         flatDelta.y = 0;
@@ -2332,7 +2627,7 @@
         const a = actor.lanePath[lastIndex].pos;
         const b = actor.lanePath[0].pos;
         const hit = closestPointOnSegmentWithT(point, a, b);
-        if (canRejoinAtHeight(actor, point, hit.point)) {
+        if (canRejoinOnSegment(actor, a, b) && canRejoinAtHeight(actor, point, hit.point)) {
           const flatDelta = point.clone().sub(hit.point);
           flatDelta.y = 0;
           const offset = flatDelta.length();
@@ -2361,6 +2656,19 @@
         && actor.flightVelocity.y <= CONFIG.physics.highToLowRejoinMaxUpVelocity;
     }
 
+    function canRejoinOnSegment(actor, aNode, bNode) {
+      if (!aNode.loopRoute && !bNode.loopRoute) return true;
+      if (getSegmentSurfaceUp(aNode, bNode) < CONFIG.physics.derailedLandingSurfaceUp) return false;
+      return actor.flightTime >= CONFIG.physics.highToLowRejoinMinFlightTime
+        && actor.flightVelocity.y <= CONFIG.physics.highToLowRejoinMaxUpVelocity;
+    }
+
+    function getSegmentSurfaceUp(aNode, bNode) {
+      const aUp = aNode.surfaceNormal?.y ?? 1;
+      const bUp = bNode.surfaceNormal?.y ?? 1;
+      return (aUp + bUp) * 0.5;
+    }
+
     function rejoinTrack(actor, landing) {
       const tangent = landing.tangent.clone();
       tangent.y = 0;
@@ -2374,7 +2682,7 @@
       actor.derailState = 'none';
       actor.finished = false;
       actor.stopped = false;
-      actor.pressure = CONFIG.physics.derailPressure * 0.38;
+      actor.pressure = getEffectiveDerailPressure(actor) * 0.38;
       actor.lowSpeedTime = 0;
       actor.targetIndex = landing.nextIndex;
       actor.flightVelocity.set(0, 0, 0);
@@ -2443,29 +2751,81 @@
     function syncCarFromPhysics(actor) {
       const guide = getGuideTarget(actor, false);
       let slopeTangent = null;
+      let surfaceNormal = null;
       if (guide) {
-        const flatCurrent = new THREE.Vector3(actor.body.position.x, 0, actor.body.position.z);
-        const flatPrev = new THREE.Vector3(guide.prev.pos.x, 0, guide.prev.pos.z);
-        const flatNext = new THREE.Vector3(guide.node.pos.x, 0, guide.node.pos.z);
-        const projected = closestPointOnSegmentWithT(flatCurrent, flatPrev, flatNext);
-        const groundY = THREE.MathUtils.lerp(guide.prev.pos.y, guide.node.pos.y, projected.t);
-        actor.body.position.y = THREE.MathUtils.lerp(actor.body.position.y, groundY, 0.55);
-        slopeTangent = guide.node.pos.clone().sub(guide.prev.pos);
-      }
-      actor.mesh.position.set(actor.body.position.x, actor.body.position.y + CONFIG.carVisualYOffset, actor.body.position.z);
-      const velocity = new THREE.Vector3(actor.body.velocity.x, 0, actor.body.velocity.z);
-      if (slopeTangent && slopeTangent.lengthSq() > 0.0001) {
-        const direction = slopeTangent.normalize();
-        if (velocity.lengthSq() > 0.0001 && direction.x * velocity.x + direction.z * velocity.z < 0) {
-          direction.multiplyScalar(-1);
+        const followsLoopRoute = Boolean(guide.prev.loopRoute || guide.node.loopRoute);
+        if (followsLoopRoute) {
+          const projected = closestPointOnSegmentWithT(
+            new THREE.Vector3(actor.body.position.x, actor.body.position.y, actor.body.position.z),
+            guide.prev.pos,
+            guide.node.pos
+          );
+          if (guide.prev.surfaceNormal && guide.node.surfaceNormal) {
+            surfaceNormal = guide.prev.surfaceNormal.clone().lerp(guide.node.surfaceNormal, projected.t).normalize();
+          }
+          actor.body.position.x = THREE.MathUtils.lerp(actor.body.position.x, projected.point.x, 0.22);
+          actor.body.position.y = THREE.MathUtils.lerp(actor.body.position.y, projected.point.y, 0.92);
+          actor.body.position.z = THREE.MathUtils.lerp(actor.body.position.z, projected.point.z, 0.22);
+        } else {
+          const flatCurrent = new THREE.Vector3(actor.body.position.x, 0, actor.body.position.z);
+          const flatPrev = new THREE.Vector3(guide.prev.pos.x, 0, guide.prev.pos.z);
+          const flatNext = new THREE.Vector3(guide.node.pos.x, 0, guide.node.pos.z);
+          const projected = closestPointOnSegmentWithT(flatCurrent, flatPrev, flatNext);
+          const groundY = THREE.MathUtils.lerp(guide.prev.pos.y, guide.node.pos.y, projected.t);
+          actor.body.position.y = THREE.MathUtils.lerp(actor.body.position.y, groundY, 0.55);
         }
+        slopeTangent = guide.node.pos.clone().sub(guide.prev.pos);
+        stabilizeActorForward(actor, slopeTangent, surfaceNormal);
+      }
+      if (surfaceNormal) {
+        actor.mesh.position
+          .set(actor.body.position.x, actor.body.position.y, actor.body.position.z)
+          .add(surfaceNormal.clone().multiplyScalar(CONFIG.carVisualYOffset));
+      } else {
+        actor.mesh.position.set(actor.body.position.x, actor.body.position.y + CONFIG.carVisualYOffset, actor.body.position.z);
+      }
+      const velocity = new THREE.Vector3(actor.body.velocity.x, 0, actor.body.velocity.z);
+      if (surfaceNormal && slopeTangent && slopeTangent.lengthSq() > 0.0001) {
+        alignCarToSurface(actor, slopeTangent, surfaceNormal);
+      } else if (slopeTangent && slopeTangent.lengthSq() > 0.0001) {
+        const direction = slopeTangent.normalize();
         const look = actor.mesh.position.clone().add(direction);
         actor.mesh.lookAt(look.x, look.y, look.z);
       } else if (velocity.lengthSq() > 0.0001) {
         const look = actor.mesh.position.clone().add(velocity);
         actor.mesh.lookAt(look.x, actor.mesh.position.y, look.z);
       }
-      actor.mesh.rotation.z += Math.sin(performance.now() * 0.05 + actor.index) * 0.004 * actor.pressure;
+      if (!surfaceNormal) {
+        actor.mesh.rotation.z += Math.sin(performance.now() * 0.05 + actor.index) * 0.004 * actor.pressure;
+      }
+    }
+
+    function alignCarToSurface(actor, tangent, surfaceNormal) {
+      const up = surfaceNormal.clone().normalize();
+      const forward = tangent.clone();
+      if (forward.lengthSq() <= 0.0001) return;
+      forward.normalize();
+      forward.sub(up.clone().multiplyScalar(forward.dot(up)));
+      if (forward.lengthSq() <= 0.0001) return;
+      forward.normalize();
+
+      actor.mesh.up.copy(up);
+      const look = actor.mesh.position.clone().add(forward);
+      actor.mesh.lookAt(look.x, look.y, look.z);
+      actor.mesh.up.set(0, 1, 0);
+    }
+
+    function stabilizeActorForward(actor, tangent, surfaceNormal = null) {
+      if (!tangent || tangent.lengthSq() <= 0.0001) return;
+      const candidate = tangent.clone();
+      if (!surfaceNormal) candidate.y = 0;
+      if (candidate.lengthSq() <= 0.0001) return;
+      candidate.normalize();
+      if (actor.routeForward.lengthSq() > 0.0001 && candidate.dot(actor.routeForward) < -0.35) {
+        candidate.multiplyScalar(-1);
+        tangent.multiplyScalar(-1);
+      }
+      actor.routeForward.copy(candidate);
     }
 
     function summarizeCars() {
@@ -2522,6 +2882,7 @@
       carInfoDerailRisk.textContent = `${risk}%`;
       carInfoStability.textContent = `${stability}%`;
       carInfoMotor.textContent = `${actor.params.motorAccel.toFixed(1)} / ${actor.params.maxSpeed.toFixed(1)} m/s`;
+      carInfoWeight.textContent = `${actor.params.weight.toFixed(2)}x`;
     }
 
     function getCarStatus(actor) {
@@ -2541,10 +2902,14 @@
       if (actor.derailState === 'flying') return 100;
       if (actor.derailState === 'flipping' || actor.derailState === 'wrecked' || actor.derailState === 'settled') return 100;
       if (actor.derailState === 'offtrack' || actor.derailState === 'gone') return 0;
-      const pressureRisk = actor.pressure / CONFIG.physics.derailPressure;
+      const pressureRisk = actor.pressure / getEffectiveDerailPressure(actor);
       const speedExcess = Math.max(0, actor.speed - CONFIG.physics.curveSafeSpeed);
       const speedRisk = speedExcess / Math.max(1, actor.params.maxSpeed - CONFIG.physics.curveSafeSpeed);
       return THREE.MathUtils.clamp(Math.round(Math.max(pressureRisk, speedRisk * 0.75) * 100), 0, 100);
+    }
+
+    function getEffectiveDerailPressure(actor) {
+      return CONFIG.physics.derailPressure * Math.sqrt(THREE.MathUtils.clamp(actor.params?.weight ?? 1, 0.5, 2));
     }
 
     function showToast(message) {

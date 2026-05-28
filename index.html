@@ -280,8 +280,23 @@
       padding: 3px 6px;
     }
 
-    .window-body input[type="color"] {
+    .color-swatches {
+      display: grid;
+      grid-template-columns: repeat(10, 1fr);
+      gap: 4px;
+    }
+
+    .color-swatch {
+      min-width: 0;
+      min-height: 24px;
       padding: 0;
+      border-width: 2px;
+      box-shadow: inset -2px -2px 0 rgba(31, 42, 22, 0.2);
+    }
+
+    .color-swatch.active {
+      outline: 3px solid var(--gb-red);
+      outline-offset: 1px;
     }
 
     .car-info-grid {
@@ -370,6 +385,7 @@
       <button data-tool="curveR" title="右彎"><span class="tool-icon"><img src="./images/curveR.png" alt=""></span></button>
       <button data-tool="crossover" title="交叉轉線"><span class="tool-icon"><img src="./images/crossover.png" alt=""></span></button>
       <button data-tool="wave" title="波浪道"><span class="tool-icon"><img src="./images/wave.png" alt=""></span></button>
+      <button data-tool="loop" title="垂直環"><span class="tool-icon">○</span></button>
       <button data-tool="start" title="起點"><span class="tool-icon"><img src="./images/start.png" alt=""></span></button>
       <button id="rotateBtn" title="旋轉"><span class="tool-icon"><img src="./images/rotateBtn.png" alt=""></span></button>
       <button id="eraseBtn" title="擦除"><span class="tool-icon"><img src="./images/eraseBtn.png" alt=""></span></button>
@@ -393,10 +409,11 @@
       <button id="closeCarWindowBtn" title="關閉">×</button>
     </div>
     <div class="window-body">
-      <label>車殼色 <input id="carColorInput" type="color" value="#e43d30"></label>
+      <label>車殼色 <div id="carColorSwatches" class="color-swatches"></div></label>
       <label>起步速度 <input id="carStartSpeedInput" type="range" min="2.0" max="15.0" step="0.1" value="3.8"></label>
       <label>馬達 <input id="carMotorInput" type="range" min="2.0" max="36.0" step="0.1" value="4.1"></label>
       <label>極速 <input id="carMaxSpeedInput" type="range" min="7.0" max="42.0" step="0.1" value="12.2"></label>
+      <label>重量 <input id="carWeightInput" type="range" min="0.70" max="1.60" step="0.05" value="1.00"></label>
       <button id="launchCarBtn" class="primary">出發</button>
     </div>
   </section>
@@ -429,6 +446,7 @@
         <div class="car-info-row"><span>飛出軌機率</span><span id="carInfoDerailRisk">0%</span></div>
         <div class="car-info-row"><span>穩定度</span><span id="carInfoStability">100%</span></div>
         <div class="car-info-row"><span>馬達 / 極速</span><span id="carInfoMotor">-</span></div>
+        <div class="car-info-row"><span>重量</span><span id="carInfoWeight">-</span></div>
       </div>
     </div>
   </section>

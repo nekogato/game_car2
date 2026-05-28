@@ -1,7 +1,7 @@
 # State
 
-Last action: Added a delay/downward-velocity requirement before raised-crossover derailments may rejoin lower lanes, preventing immediate upper-to-lower snapping.
+Last action: Changed climb stalls so speed loss alone only causes rollback; stalled cars drop only when they are on unsupported side/top loop surfaces, and stall guide force no longer pushes them forward.
 
 Current milestone: First playable prototype.
 
-Next step: Playtest raised crossover runs in a browser at `http://localhost:8080`, especially that upper-lane cars only fall to lower lanes after a real airborne drop.
+Next step: Playtest slow loop climbs; cars should roll back on supported uphill sections, fall only from unsupported side/top sections, and avoid sudden unpushed forward launches.

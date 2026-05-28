@@ -26,10 +26,15 @@ A browser-based 3D toy racing game where the player builds a mini 4WD-style trac
 ## Simplified Physics
 
 - The car has speed, motor acceleration, drag, and a maximum speed.
+- The configured start speed is only the launch impulse; it is not a permanent minimum speed while driving.
 - A cannon-es physics body drives the car during test runs.
 - Multiple cars are represented by separate cannon-es sphere bodies so car-to-car contact is resolved by the physics world.
 - Each car gets a fixed lane path at launch; lane-change pieces smoothly move that path into the adjacent lane.
 - Crossover lane-change pieces can swap outer lanes with a raised overpass path while the middle lane snakes aside.
+- Loop raised-lane pieces follow crossover routing: lower lanes stay on the crossover underpass paths, while the raised crossover path becomes a short entry straight, one full vertical elliptical loop, then a short exit straight.
+- Loop raised-lane geometry uses fixed upward surface normals on straight portions and inward radial normals through the loop so the track surface faces the loop center without twisting.
+- Loop raised-lane car guidance samples the same loop curve used by the visual mesh and uses 3D steering through the loop so cars follow the visible ring instead of a flat lane projection.
+- Car body orientation keeps a continuous track-forward direction through loop transitions and uses the same look-at convention on flat and looped surfaces so entering a loop cannot visually flip the car 180 degrees.
 - Lane dividers are full-height sideboards and each car is physically constrained to its assigned lane.
 - Curves are sampled as continuous quarter-circle arcs instead of center-point right angles.
 - Uphill segments slow the car; downhill segments add speed.
@@ -39,6 +44,8 @@ A browser-based 3D toy racing game where the player builds a mini 4WD-style trac
 - Tire friction and small lateral wander make cars imperfectly track the centerline.
 - Excess curve pressure makes the car leave the track.
 - Very low speed can stall the car on a climb or stop it on track.
+- Climb stalls keep the car physical and pushable; losing speed alone makes the car roll backward, while only unsupported side/top loop stalls fall without a forward launch after lingering too long.
+- Car setup includes weight: heavier cars accelerate and steer more slowly and climb worse, but build derail pressure more slowly and tolerate more pressure before leaving the track.
 
 ## Persistence
 
