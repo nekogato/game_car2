@@ -14,6 +14,7 @@ export const CONFIG = {
   loopEntryPortion: 0.01,
   loopExitPortion: 0.99,
   loopDepth: 5.45,
+  loopLateralSeparation: -0.38,
   loopStraightInset: 0.12,
   loopPathSamples: 72,
   loopMirrorLateral: true,

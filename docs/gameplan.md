@@ -30,9 +30,10 @@ A browser-based 3D toy racing game where the player builds a mini 4WD-style trac
 - A cannon-es physics body drives the car during test runs.
 - Multiple cars are represented by separate cannon-es sphere bodies so car-to-car contact is resolved by the physics world.
 - Each car gets a fixed lane path at launch; lane-change pieces smoothly move that path into the adjacent lane.
-- Crossover lane-change pieces can swap outer lanes with a raised overpass path while the middle lane snakes aside.
-- Loop raised-lane pieces follow crossover routing: lower lanes stay on the crossover underpass paths, while the raised crossover path becomes a short entry straight, one full vertical elliptical loop, then a short exit straight. Loop routes recover pressure rather than adding derail pressure.
+- Crossover lane-change pieces can swap lanes with a raised overpass path; with 2 lanes, one lane goes raised while the other stays lower, and with 3 lanes the middle lane snakes aside.
+- Loop raised-lane pieces follow crossover routing when at least 2 lanes exist: lower lanes stay on the crossover underpass paths, while the raised crossover path becomes a short entry straight, one full vertical elliptical loop, then a short exit straight. Loop routes recover pressure rather than adding derail pressure.
 - Loop raised-lane geometry uses fixed upward surface normals on straight portions and inward radial normals through the loop so the track surface faces the loop center without twisting.
+- Loop raised-lane geometry offsets the uphill and downhill halves laterally inside the loop while keeping entry/exit connectors aligned, reducing visual self-intersection.
 - Loop raised-lane car guidance samples the same loop curve used by the visual mesh and uses 3D steering through the loop so cars follow the visible ring instead of a flat lane projection.
 - Car body orientation keeps a continuous track-forward direction through loop transitions and uses the same look-at convention on flat and looped surfaces so entering a loop cannot visually flip the car 180 degrees.
 - Cars relocalize to the nearest lane segment while driving, including during rollback, so slope, curve, and loop orientation are calculated from the car's current track position.
@@ -42,6 +43,9 @@ A browser-based 3D toy racing game where the player builds a mini 4WD-style trac
 - Curves build stability pressure when entered too fast, with light speed loss so fast cornering feels risky rather than heavily braked.
 - Sideboard collision is calculated against the nearest sampled track segment; the car is pushed back inside the usable lane and loses lateral speed.
 - Sideboard and active car collisions use the car's configured footprint rather than a tiny center point, with elongated car-to-car separation while driving.
+- Transition floors are generated as a band between the sideboard paths so lane-change, crossover, and loop floor edges follow the rail connector curve.
+- Wave track lanes share one sideboard at each internal lane boundary instead of duplicating rails from adjacent lanes.
+- Single-lane transition pieces use the full lane width so their floors and sideboards connect flush to neighboring pieces.
 - Closed tracks loop through the start piece instead of ending when the car returns to the start.
 - Tire friction and small lateral wander make cars imperfectly track the centerline.
 - Excess curve pressure makes the car leave the track.

@@ -910,20 +910,41 @@
 
       for (let lane = 0; lane < state.laneCount; lane += 1) {
         const center = createLaneLocalPath(type, lane, 36, 0);
-        const strip = createPathSegments(
-          center,
-          deckY + CONFIG.trackHeight * 0.5 + 0.012,
-          routeMat,
-          {
-            width: getTransitionLaneSurfaceWidth(type),
-            height: 0.018,
-            yOffset: (t) => getLaneVerticalOffset(type, lane, getLaneEndForPiece(type, lane), t),
-          }
-        );
-        group.add(strip);
+        const deckWidth = getTransitionLaneSurfaceWidth(type);
+        const laneEnd = getLaneEndForPiece(type, lane);
+        const verticalOffset = (t) => getLaneVerticalOffset(type, lane, laneEnd, t);
+        const hasLocalSideboards = (type !== 'crossover' && type !== 'loop') || state.laneCount < 3;
+        const sideOffset = deckWidth * 0.5 / getLaneWidth();
 
-        if ((type !== 'crossover' && type !== 'loop') || state.laneCount < 3) {
-          for (const side of [-0.5, 0.5]) {
+        if (hasLocalSideboards) {
+          const leftPath = createLaneLocalPath(type, lane, 36, -sideOffset);
+          const rightPath = createLaneLocalPath(type, lane, 36, sideOffset);
+          group.add(new THREE.Mesh(
+            createPathBandGeometry(
+              leftPath,
+              rightPath,
+              0.018,
+              deckY + CONFIG.trackHeight * 0.5 + 0.012,
+              verticalOffset
+            ),
+            routeMat
+          ));
+        } else {
+          const strip = createPathSegments(
+            center,
+            deckY + CONFIG.trackHeight * 0.5 + 0.012,
+            routeMat,
+            {
+              width: deckWidth,
+              height: 0.018,
+              yOffset: verticalOffset,
+            }
+          );
+          group.add(strip);
+        }
+
+        if (hasLocalSideboards) {
+          getTransitionSideboardOffsets(type, lane, sideOffset).forEach((side) => {
             const sidePath = createLaneLocalPath(type, lane, 36, side);
             group.add(createPathSegments(
               sidePath,
@@ -933,10 +954,10 @@
                 width: CONFIG.railWidth,
                 height: CONFIG.railHeight,
                 outline: true,
-                yOffset: (t) => getLaneVerticalOffset(type, lane, getLaneEndForPiece(type, lane), t),
+                yOffset: verticalOffset,
               }
             ));
-          }
+          });
         }
       }
 
@@ -967,9 +988,20 @@
     }
 
     function getTransitionLaneSurfaceWidth(type) {
-      if (state.laneCount <= 1) return getLaneWidth() * 0.72;
+      if (state.laneCount <= 1) return getLaneWidth();
       if (type === 'crossover') return Math.max(0.18, getLaneWidth() - CONFIG.railWidth * 0.95);
       return Math.max(0.18, getLaneWidth() - CONFIG.railWidth * 1.25);
+    }
+
+    function getTransitionSideboardOffsets(type, lane, sideOffset) {
+      if (type !== 'wave' || state.laneCount <= 1) {
+        return [-sideOffset, sideOffset];
+      }
+      const offsets = [];
+      if (lane === 0) offsets.push(-sideOffset);
+      if (lane < state.laneCount - 1) offsets.push(0.5);
+      if (lane === state.laneCount - 1) offsets.push(sideOffset);
+      return offsets;
     }
 
     function createCrossoverRailSpecs() {
@@ -1207,6 +1239,63 @@
       for (const i of [0, segments]) {
         indices.push(topOuter + i, topInner + i, bottomOuter + i);
         indices.push(topInner + i, bottomInner + i, bottomOuter + i);
+      }
+
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+      geometry.setIndex(indices);
+      geometry.computeVertexNormals();
+      return geometry;
+    }
+
+    function createPathBandGeometry(leftPoints, rightPoints, height, baseY, yOffset = (() => 0)) {
+      const vertices = [];
+      const indices = [];
+      const halfHeight = height * 0.5;
+      const getSurfaceNormal = (point) => {
+        const normal = point.surfaceNormal
+          ? point.surfaceNormal.clone()
+          : new THREE.Vector3(0, 1, 0);
+        if (normal.lengthSq() <= 0.0001) return new THREE.Vector3(0, 1, 0);
+        return normal.normalize();
+      };
+      const getPointCenter = (point) => {
+        const surfaceNormal = getSurfaceNormal(point);
+        if (point.surfaceNormal) {
+          return new THREE.Vector3(point.x, point.y ?? yOffset(point.t), point.z)
+            .add(surfaceNormal.multiplyScalar(baseY));
+        }
+        return new THREE.Vector3(point.x, baseY + (point.y ?? yOffset(point.t)), point.z);
+      };
+
+      const count = Math.min(leftPoints.length, rightPoints.length);
+      for (let i = 0; i < count; i += 1) {
+        const leftPoint = leftPoints[i];
+        const rightPoint = rightPoints[i];
+        const left = getPointCenter(leftPoint);
+        const right = getPointCenter(rightPoint);
+        const normal = (leftPoint.surfaceNormal || rightPoint.surfaceNormal)
+          ? getSurfaceNormal(leftPoint.surfaceNormal ? leftPoint : rightPoint)
+          : new THREE.Vector3(0, 1, 0);
+        const leftTop = left.clone().add(normal.clone().multiplyScalar(halfHeight));
+        const rightTop = right.clone().add(normal.clone().multiplyScalar(halfHeight));
+        const leftBottom = left.clone().sub(normal.clone().multiplyScalar(halfHeight));
+        const rightBottom = right.clone().sub(normal.clone().multiplyScalar(halfHeight));
+        vertices.push(
+          leftTop.x, leftTop.y, leftTop.z,
+          rightTop.x, rightTop.y, rightTop.z,
+          leftBottom.x, leftBottom.y, leftBottom.z,
+          rightBottom.x, rightBottom.y, rightBottom.z
+        );
+      }
+
+      for (let i = 0; i < count - 1; i += 1) {
+        const a = i * 4;
+        const b = (i + 1) * 4;
+        indices.push(a, b, a + 1, a + 1, b, b + 1);
+        indices.push(a + 2, a + 3, b + 2, a + 3, b + 3, b + 2);
+        indices.push(a, a + 2, b, a + 2, b + 2, b);
+        indices.push(a + 1, b + 1, a + 3, a + 3, b + 1, b + 3);
       }
 
       const geometry = new THREE.BufferGeometry();
@@ -1674,11 +1763,11 @@
     }
 
     function isRaisedCrossoverRoute(type, laneStart, laneEnd) {
-      return type === 'crossover' && state.laneCount >= 3 && laneStart === 0 && laneEnd === state.laneCount - 1;
+      return type === 'crossover' && state.laneCount >= 2 && laneStart === 0 && laneEnd === state.laneCount - 1;
     }
 
     function isLoopCrossoverRoute(type, laneStart, laneEnd) {
-      return type === 'loop' && state.laneCount >= 3 && laneStart === 0 && laneEnd === state.laneCount - 1;
+      return type === 'loop' && state.laneCount >= 2 && laneStart === 0 && laneEnd === state.laneCount - 1;
     }
 
     function getLoopVerticalOffset(t) {
@@ -1698,6 +1787,7 @@
       const radiusZ = CONFIG.loopDepth * 0.5;
       let y = 0;
       let z = loopStartZ;
+      let lateralSeparation = 0;
       let surfaceNormal = new THREE.Vector3(0, 1, 0);
 
       if (t < entryEnd) {
@@ -1710,6 +1800,7 @@
         const loopCenterZ = THREE.MathUtils.lerp(loopStartZ, loopEndZ, loopT);
         y = radiusY * (1 - Math.cos(angle));
         z = loopCenterZ - Math.sin(angle) * radiusZ;
+        lateralSeparation = Math.sin(angle) * CONFIG.loopLateralSeparation;
         surfaceNormal = new THREE.Vector3(0, radiusY - y, loopCenterZ - z).normalize();
       }
 
@@ -1721,7 +1812,7 @@
         ? state.laneCount - 1 - baseLaneFloat
         : baseLaneFloat;
       const point = new THREE.Vector3(
-        getLaneOffsetForFloat(laneFloat),
+        getLaneOffsetForFloat(laneFloat) + lateralSeparation,
         y,
         z
       );
@@ -2153,7 +2244,7 @@
     }
 
     function resolveCrossoverUnderpassConstraint(actor) {
-      if (state.laneCount < 3) return;
+      if (state.laneCount < 2) return;
       const guide = getGuideTarget(actor, false);
       if (!guide || guide.node.raisedCrossover || guide.prev.raisedCrossover) return;
       if (guide.piece?.type !== 'crossover' && guide.piece?.type !== 'loop') return;

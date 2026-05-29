@@ -1,7 +1,7 @@
 # State
 
-Last action: Reduced corner speed loss by raising curve safe speed, lowering curve rail loss, reducing lateral tire damping, and preserving more speed on sideboard contact.
+Last action: Restored single-lane transition connector width to the full lane width so floors and sideboards meet adjacent track pieces cleanly.
 
 Current milestone: First playable prototype.
 
-Next step: Playtest sharp curves at medium and high speed; cars should keep more speed while still accumulating derail risk when overdriven.
+Next step: Playtest 1-lane transition pieces beside straight/curve pieces; floor and sideboard joins should be flush again.
